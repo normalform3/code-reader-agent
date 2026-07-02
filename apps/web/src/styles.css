@@ -199,6 +199,46 @@ button:disabled {
   text-overflow: ellipsis;
 }
 
+.path-row.compact {
+  padding: 8px 10px;
+}
+
+.tree-list {
+  display: grid;
+  max-height: 260px;
+  overflow: auto;
+  border: 1px solid #e2e8f2;
+  border-radius: 8px;
+  background: #fbfcfe;
+}
+
+.tree-row {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+  min-height: 28px;
+  border-bottom: 1px solid #eef2f7;
+  padding-right: 8px;
+}
+
+.tree-row:last-child {
+  border-bottom: 0;
+}
+
+.tree-row span {
+  color: #7b8798;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.tree-row code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .map-panel {
   min-width: 0;
   min-height: 0;
@@ -343,6 +383,18 @@ button:disabled {
   padding: 9px 10px;
 }
 
+.file-row.with-meta {
+  display: grid;
+  gap: 4px;
+}
+
+.file-row.with-meta span,
+.snippet span,
+.mini-list span {
+  color: #657288;
+  font-size: 12px;
+}
+
 code {
   color: #27364d;
   font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
@@ -363,6 +415,52 @@ code {
   padding: 14px;
 }
 
+.evidence-snippets {
+  display: grid;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.evidence-snippets h4 {
+  margin: 0;
+  color: #172033;
+  font-size: 13px;
+}
+
+.snippet {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #e2e8f2;
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 11px;
+}
+
+.snippet > div {
+  display: grid;
+  gap: 3px;
+}
+
+.snippet p {
+  color: #4f5d73;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.snippet pre {
+  max-height: 180px;
+  overflow: auto;
+  margin: 0;
+  border-radius: 7px;
+  background: #111827;
+  color: #d9e7ff;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
 .answer-card ol {
   display: grid;
   gap: 10px;
@@ -379,6 +477,38 @@ code {
 .answer-card li code {
   display: block;
   margin-bottom: 2px;
+}
+
+.mini-list,
+.suggestion-list {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+}
+
+.mini-list code {
+  overflow: hidden;
+  border-radius: 7px;
+  background: #f6f8fb;
+  padding: 7px 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.suggestion-button {
+  min-height: unset;
+  border: 1px solid #dce4ef;
+  background: #fbfcfe;
+  color: #25334a;
+  font-size: 12px;
+  font-weight: 650;
+  padding: 8px 10px;
+  text-align: left;
+}
+
+.suggestion-button:hover {
+  border-color: #9fbce8;
+  background: #f4f8ff;
 }
 
 .evidence-panel {

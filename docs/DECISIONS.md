@@ -210,3 +210,23 @@
 选择原因：这种方式更稳定、更便宜，也更容易绑定 evidence。
 
 后续影响：Context Manager 和 tools 必须支持渐进式读取。
+
+## 为什么 Phase 4.5 先做可信理解闭环，而不是直接接入 LLM 或多 Agent
+
+日期：2026-07-02
+
+状态：Accepted
+
+背景：项目已经具备扫描、Repo Map、确定性解释和 Web UI 的最小闭环，但 evidence 粒度、工具调用记录和 UI 可验证性还不够强。如果此时直接接入 LLM 或多 Agent，容易让产品看起来更智能，但用户仍然无法判断结论是否可信。
+
+备选方案：
+
+- 立即接入真实 LLM provider。
+- 立即实现 Planner/Explorer/Analyzer/Writer/Reviewer 多 Agent。
+- 先补可信理解闭环。
+
+最终选择：先补可信理解闭环。
+
+选择原因：片段级 evidence、安全只读工具、最小 Skill Router 和工作台式 UI 能直接提升用户信任，也能为后续 LLM 和 Reviewer 提供稳定输入。
+
+后续影响：Phase 4.5 只做 Vue/Java 范围内的证据增强和确定性 skill，不扩语言、不做完整调用链图、不声称完成真实多 Agent。

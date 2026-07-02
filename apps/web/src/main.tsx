@@ -16,6 +16,13 @@ type Entrypoint = {
   exists: boolean;
 };
 
+type FileTreeEntry = {
+  path: string;
+  name: string;
+  kind: "file" | "directory";
+  depth: number;
+};
+
 type RepoMapModule = {
   id: string;
   name: string;
@@ -36,13 +43,19 @@ type RepoMapFile = {
   importance_score: number;
   summary: string;
   related_modules: string[];
+  evidence: string[];
 };
 
 type RepoMapEvidence = {
   id: string;
+  source: string;
   path: string;
   reason: string;
   collected_by_tool: string;
+  start_line: number | null;
+  end_line: number | null;
+  excerpt: string | null;
+  collected_at: string | null;
 };
 
 type RepoMap = {
@@ -55,6 +68,7 @@ type RepoMap = {
   entrypoints: Entrypoint[];
   modules: RepoMapModule[];
   files: RepoMapFile[];
+  file_tree: FileTreeEntry[];
   api_endpoints: string[];
   api_flows: string[];
   auth_flows: string[];
@@ -82,7 +96,23 @@ type Interpretation = {
   overview: string;
   setup_summary: string;
   reading_path: ReadingPathItem[];
-  evidence: Array<{ path: string; reason: string; source: string }>;
+  evidence: Array<{
+    path: string;
+    reason: string;
+    source: string;
+    start_line: number | null;
+    end_line: number | null;
+    excerpt: string | null;
+  }>;
+  tool_calls: Array<{
+    tool_name: string;
+    input_summary: string;
+    output_summary: string;
+    status: "success" | "error";
+    error: string | null;
+  }>;
+  read_files: string[];
+  suggested_questions: string[];
   warnings: string[];
 };
 
@@ -103,6 +133,24 @@ function App() {
     }
     return repoMap.modules.find((module) => module.id === selectedModuleId) ?? repoMap.modules[0] ?? null;
   }, [repoMap, selectedModuleId]);
+
+  const evidenceById = useMemo(() => {
+    return new Map(repoMap?.evidence.map((item) => [item.id, item]) ?? []);
+  }, [repoMap]);
+
+  const selectedModuleFiles = useMemo(() => {
+    if (!repoMap || !selectedModule) {
+      return [];
+    }
+    const fileSet = new Set(selectedModule.key_files);
+    return repoMap.files.filter((file) => fileSet.has(file.path));
+  }, [repoMap, selectedModule]);
+
+  const importantFiles = useMemo(() => {
+    return [...(repoMap?.files ?? [])]
+      .sort((left, right) => right.importance_score - left.importance_score || left.path.localeCompare(right.path))
+      .slice(0, 10);
+  }, [repoMap]);
 
   async function handleScan(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -202,6 +250,30 @@ function App() {
             </button>
           )) ?? <span className="muted">等待生成 Repo Map</span>}
         </div>
+
+        <SectionTitle title="文件树" />
+        <div className="tree-list">
+          {repoMap?.file_tree.slice(0, 36).map((entry) => (
+            <div className="tree-row" key={entry.path} style={{ paddingLeft: `${entry.depth * 12 + 8}px` }}>
+              <span>{entry.kind === "directory" ? "dir" : "file"}</span>
+              <code>{entry.path}</code>
+            </div>
+          )) ?? <span className="muted">等待扫描文件树</span>}
+        </div>
+
+        <SectionTitle title="重要文件" />
+        <div className="path-list">
+          {importantFiles.length > 0 ? (
+            importantFiles.map((file) => (
+              <button className="path-row compact" key={file.path}>
+                <span>{file.role}</span>
+                <strong>{file.path}</strong>
+              </button>
+            ))
+          ) : (
+            <span className="muted">等待 Repo Map 评分</span>
+          )}
+        </div>
       </aside>
 
       <section className="map-panel">
@@ -244,11 +316,27 @@ function App() {
               </div>
               <p>{selectedModule.responsibility}</p>
               <div className="file-table">
-                {selectedModule.key_files.map((file) => (
-                  <div className="file-row" key={file}>
-                    <code>{file}</code>
+                {selectedModuleFiles.map((file) => (
+                  <div className="file-row with-meta" key={file.path}>
+                    <code>{file.path}</code>
+                    <span>
+                      {file.role}
+                      {file.language ? ` · ${file.language}` : ""}
+                      {file.framework ? ` · ${file.framework}` : ""}
+                    </span>
                   </div>
                 ))}
+              </div>
+              <div className="evidence-snippets">
+                <h4>模块证据</h4>
+                {selectedModule.evidence.length > 0 ? (
+                  selectedModule.evidence.map((evidenceId) => {
+                    const evidence = evidenceById.get(evidenceId);
+                    return evidence ? <EvidenceSnippet evidence={evidence} key={evidence.id} /> : null;
+                  })
+                ) : (
+                  <p className="muted">该模块目前只有路径规则推断，暂无片段证据。</p>
+                )}
               </div>
             </>
           ) : (
@@ -286,19 +374,48 @@ function App() {
             ))}
           </ol>
         </div>
+
+        <div className="answer-card">
+          <h3>依据文件</h3>
+          <div className="mini-list">
+            {interpretation?.read_files.map((path) => <code key={path}>{path}</code>) ?? <span className="muted">暂无读取记录</span>}
+          </div>
+        </div>
+
+        <div className="answer-card">
+          <h3>推荐追问</h3>
+          <div className="suggestion-list">
+            {interpretation?.suggested_questions.map((suggestion) => (
+              <button
+                className="suggestion-button"
+                key={suggestion}
+                onClick={() => {
+                  setQuestion(suggestion);
+                }}
+              >
+                {suggestion}
+              </button>
+            )) ?? <span className="muted">扫描后会生成下一步问题</span>}
+          </div>
+        </div>
       </aside>
 
       <section className="evidence-panel">
         <EvidenceColumn
           title="工具调用"
+          rows={
+            interpretation?.tool_calls.map((call) => `${call.tool_name} · ${call.status} · ${call.output_summary}`) ?? [
+              repoMap ? "build_repo_map · success · 模块地图已生成" : "等待工具调用",
+            ]
+          }
+        />
+        <EvidenceColumn
+          title="证据"
           rows={[
-            repoMap ? "list_files -> 文件树" : "list_files 等待中",
-            repoMap ? "read_config -> 包配置/Java 构建配置" : "read_config 等待中",
-            repoMap ? "build_repo_map -> 模块地图" : "build_repo_map 等待中",
-            interpretation ? "project_overview_skill -> 回答" : "project_overview_skill 等待中",
+            ...(repoMap?.evidence.map((item) => `${item.path} - ${item.reason}`) ?? []),
+            ...(interpretation?.evidence.map((item) => `${item.path} - ${item.reason}`) ?? []),
           ]}
         />
-        <EvidenceColumn title="证据" rows={repoMap?.evidence.map((item) => `${item.path} - ${item.reason}`) ?? []} />
         <EvidenceColumn title="提醒" rows={[...(repoMap?.warnings ?? []), ...(interpretation?.warnings ?? [])]} />
       </section>
     </main>
@@ -314,6 +431,22 @@ function EmptyState({ title, body }: { title: string; body: string }) {
     <div className="empty-state">
       <strong>{title}</strong>
       <span>{body}</span>
+    </div>
+  );
+}
+
+function EvidenceSnippet({ evidence }: { evidence: RepoMapEvidence }) {
+  return (
+    <div className="snippet">
+      <div>
+        <code>{evidence.path}</code>
+        <span>
+          {evidence.collected_by_tool}
+          {evidence.start_line && evidence.end_line ? ` · L${evidence.start_line}-L${evidence.end_line}` : ""}
+        </span>
+      </div>
+      <p>{evidence.reason}</p>
+      {evidence.excerpt ? <pre>{evidence.excerpt}</pre> : null}
     </div>
   );
 }

@@ -53,14 +53,26 @@
 - `POST /api/projects/repo-map` 支持基础 Repo Map 生成。
 - `apps/web` 提供 Vite + React + TypeScript 本地工作台原型。
 - `POST /api/agent/project-interpretation` 支持确定性项目总览、启动建议和推荐阅读路径。
+- Repo Map 和 Agent 解释支持片段级 evidence、已读取文件和工具调用记录。
+- Agent 解释已具备最小 Skill Router，可路由到项目总览、运行方式和前端结构分析。
 
 仍未完成：
 
 - 精准 AST 级调用链。
-- 任务事件流。
+- 任务事件流和持久化任务历史。
 - 持久化扫描历史。
 - 真实 LLM provider 接入。
 - 多 Agent 编排和 Reviewer。
+
+## Phase 4.5：可信理解闭环
+
+- 补齐片段级 evidence：文件路径、行号、摘录、收集工具和收集时间。
+- 实现安全只读工具：`read_file` 和 `search_code`。
+- 默认拒绝读取 `.env`、私钥、证书等敏感文件，并限制路径不能越过项目根目录。
+- Web UI 展示文件树、重要文件、模块证据片段、已读取文件、工具调用和 warnings。
+- Skill Router 支持 `project_overview_skill`、`setup_analysis_skill`、`frontend_analysis_skill`。
+- 登录/API 问题仅识别候选文件和关键词，不声称完成调用链追踪。
+- 保持 Vue / Java 为 MVP 技术栈，不在该阶段扩展 React、Next.js、FastAPI 等新栈。
 
 ## Phase 5：Skills 机制增强
 

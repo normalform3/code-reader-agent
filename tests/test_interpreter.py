@@ -27,6 +27,10 @@ def test_interpret_project_returns_prompt_and_grounded_summary(tmp_path: Path) -
         "src/router/index.ts",
     ]
     assert "package.json" in {item.path for item in result.evidence}
+    assert any(item.excerpt for item in result.evidence if item.path == "package.json")
+    assert "package.json" in result.read_files
+    assert {call.tool_name for call in result.tool_calls} >= {"list_files", "read_file", "project_interpreter"}
+    assert result.suggested_questions
     assert result.warnings == []
 
 
@@ -46,6 +50,7 @@ def test_interpret_project_returns_java_onboarding_summary(tmp_path: Path) -> No
     result = interpret_project(str(tmp_path), "这个 Java 项目怎么运行？")
 
     assert result.project_name == "demo-service"
+    assert result.skill == "setup_analysis_skill"
     assert "Java" in result.overview
     assert "mvn spring-boot:run" in result.setup_summary
     assert "mvn test" in result.setup_summary
@@ -57,3 +62,28 @@ def test_interpret_project_returns_java_onboarding_summary(tmp_path: Path) -> No
         "src/main/java/com/example/demo/DemoApplication.java",
     ]
     assert result.warnings == []
+
+
+def test_interpret_project_routes_frontend_question(tmp_path: Path) -> None:
+    write_minimal_vue_project(tmp_path)
+
+    result = interpret_project(str(tmp_path), "前端结构和页面在哪里？")
+
+    assert result.skill == "frontend_analysis_skill"
+    assert "前端结构" in result.overview
+    assert [item.path for item in result.reading_path][:4] == [
+        "vite.config.ts",
+        "src/main.ts",
+        "src/App.vue",
+        "src/router/index.ts",
+    ]
+    assert any(item.source == "frontend_analysis_skill" for item in result.evidence)
+
+
+def test_interpret_project_marks_flow_questions_as_candidate_only(tmp_path: Path) -> None:
+    write_minimal_java_project(tmp_path)
+
+    result = interpret_project(str(tmp_path), "登录认证 API 在哪里？")
+
+    assert any("尚未实现完整调用链追踪" in warning for warning in result.warnings)
+    assert any(call.tool_name == "search_code" for call in result.tool_calls)

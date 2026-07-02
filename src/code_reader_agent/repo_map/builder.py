@@ -13,6 +13,7 @@ from code_reader_agent.models import (
     RepoMapFile,
     RepoMapModule,
 )
+from code_reader_agent.tools.read_only import ReadOnlyToolError, read_file
 
 
 MODULE_DEFINITIONS = {
@@ -48,6 +49,7 @@ def build_repo_map(scan: ProjectScanResult) -> RepoMap:
         entrypoints=scan.entrypoints,
         modules=modules,
         files=repo_files,
+        file_tree=scan.file_tree,
         dependencies={**scan.package.dependencies, **scan.package.dev_dependencies, **scan.java_build.dependencies},
         routes=[item.path for item in repo_files if item.role == "router"],
         api_endpoints=[item.path for item in repo_files if item.role in {"api_client", "controller"}],
@@ -68,22 +70,65 @@ def build_repo_map(scan: ProjectScanResult) -> RepoMap:
 def _build_evidence(scan: ProjectScanResult) -> list[RepoMapEvidence]:
     evidence: list[RepoMapEvidence] = []
     if scan.package.found:
-        evidence.append(_evidence("package.json", "package.json", "Frontend package metadata, scripts, and dependencies.", "read_config"))
+        evidence.append(
+            _evidence(
+                scan.project_path,
+                "package.json",
+                "package.json",
+                "Frontend package metadata, scripts, and dependencies.",
+                "read_config",
+            )
+        )
     if scan.java_build.found:
         build_path = "pom.xml" if scan.java_build.build_tool == "maven" else "build.gradle" if scan.java_build.build_tool == "gradle" else "<file_tree>"
-        evidence.append(_evidence(build_path, build_path, "Java build metadata and dependencies.", "read_config"))
+        evidence.append(_evidence(scan.project_path, build_path, build_path, "Java build metadata and dependencies.", "read_config"))
     for entrypoint in scan.entrypoints:
-        evidence.append(_evidence(entrypoint.path, entrypoint.path, f"Detected {entrypoint.kind} entrypoint.", "find_entrypoints"))
+        evidence.append(
+            _evidence(
+                scan.project_path,
+                entrypoint.path,
+                entrypoint.path,
+                f"Detected {entrypoint.kind} entrypoint.",
+                "find_entrypoints",
+            )
+        )
     return _dedupe_evidence(evidence)
 
 
-def _evidence(evidence_id: str, path: str, reason: str, tool: str) -> RepoMapEvidence:
+def _evidence(project_path: str, evidence_id: str, path: str, reason: str, tool: str) -> RepoMapEvidence:
+    collected_at = datetime.now(UTC).isoformat()
+    if path.startswith("<"):
+        return RepoMapEvidence(
+            id=_stable_id("ev", evidence_id),
+            source="file_tree",
+            path=path,
+            reason=reason,
+            collected_by_tool=tool,
+            collected_at=collected_at,
+        )
+
+    try:
+        excerpt = read_file(project_path, path, line_range=(1, 40))
+    except (ReadOnlyToolError, ValueError):
+        return RepoMapEvidence(
+            id=_stable_id("ev", evidence_id),
+            source="file",
+            path=path,
+            reason=reason,
+            collected_by_tool=tool,
+            collected_at=collected_at,
+        )
+
     return RepoMapEvidence(
         id=_stable_id("ev", evidence_id),
         source="file",
         path=path,
         reason=reason,
         collected_by_tool=tool,
+        start_line=excerpt.start_line,
+        end_line=excerpt.end_line,
+        excerpt=excerpt.content,
+        collected_at=collected_at,
     )
 
 

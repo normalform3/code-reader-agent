@@ -6,10 +6,12 @@
 
 用户输入一个本地 Vue 或 Java 项目路径后，CodeReader Agent 能扫描项目、识别技术栈、生成基础 Repo Map，并在 Web UI 中展示结构化结果和基于证据的回答。
 
-第一步支持范围：
+当前 MVP 支持范围：
 
 - Vue：优先覆盖 Vue3 / Vite / TypeScript 项目，识别路由、状态管理、请求封装和页面目录。
 - Java：优先覆盖 Maven / Gradle / Spring Boot 项目，识别应用入口、包结构、Controller、Service、Repository、配置文件和测试目录。
+
+当前实现已跑通 Phase 1-4 最小闭环：本地扫描、基础 Repo Map、React/Vite 工作台、确定性项目解读和基础测试。下一步属于 Phase 4.5，重点不是扩展语言或接入真实 LLM，而是提升 evidence 粒度、只读工具安全性和 UI 可验证性。
 
 ## MVP 用户流程
 
@@ -51,6 +53,9 @@
 - 已读取文件列表。
 - 工具调用记录。
 - 简单 onboarding 总结。
+- 片段级 evidence 展示。
+- 已读取文件展示。
+- 推荐追问展示。
 
 ## MVP UI 范围
 
@@ -91,7 +96,7 @@ Phase 1 最小后端扫描闭环先实现：
 - 识别 `src/main/java/**/Application.java`、`src/main/resources/application.yml`、`src/main/resources/application.properties`、`pom.xml`、`build.gradle` 等 Java 入口和配置文件。
 - 返回 warnings，例如 Vue 项目缺少 `package.json`、Java 项目缺少构建配置或配置解析失败。
 
-完整 Repo Map Builder、任务事件流和 Agent 问答仍属于后续步骤。
+完整任务事件流、持久化扫描历史、真实 LLM provider 和多 Agent 编排仍属于后续步骤。
 
 ## MVP Agent 能力
 
@@ -100,6 +105,12 @@ MVP 只需要支持三类问题：
 - 这个项目是干什么的？
 - 这个项目怎么运行？
 - 我应该从哪些文件开始看？
+
+Phase 4.5 最小 Skill Router 会把问题确定性路由到：
+
+- `project_overview_skill`：项目总览、模块和阅读路径。
+- `setup_analysis_skill`：安装、启动、构建和测试命令候选。
+- `frontend_analysis_skill`：Vue/Vite 入口、路由、页面和组件候选。
 
 MVP 后续增强问题：
 
@@ -111,6 +122,8 @@ MVP 后续增强问题：
 
 - 尽量基于已读取文件。
 - 展示依据文件路径。
+- 尽量展示行号和片段摘录。
+- 暴露已读取文件和工具调用记录。
 - 不确定时明确说明。
 - 不编造未读取文件里的实现细节。
 

@@ -55,6 +55,14 @@ Phase 1 最小实现：
 - 不读取明显包含密钥的文件，例如 `.env`，除非用户明确确认。
 - 长文件需要截断或摘要。
 
+Phase 4.5 实现：
+
+- 由 `code_reader_agent.tools.read_only.read_file` 提供。
+- 输入必须是项目内相对路径，禁止 `..` 越过项目根目录。
+- 默认拒绝 `.env`、`.env.*`、私钥、证书、`.npmrc` 等敏感文件。
+- 支持可选行号范围。
+- 长片段默认截断并返回 warning。
+
 ### search_code
 
 用途：搜索代码关键词。
@@ -74,6 +82,14 @@ Phase 1 最小实现：
 实现建议：
 
 - 优先调用 ripgrep。
+
+Phase 4.5 实现：
+
+- 由 `code_reader_agent.tools.read_only.search_code` 提供。
+- 优先调用 `rg --fixed-strings --line-number`。
+- 当 `rg` 不可用或调用失败时，使用 Python 文件遍历 fallback。
+- 默认跳过 `.git`、`node_modules`、`dist`、`build`、虚拟环境和敏感文件。
+- 无匹配时返回空列表，不作为错误处理。
 
 ### read_config
 
@@ -228,3 +244,5 @@ Java 项目优先从 Controller mapping、Service 调用、Repository/Mapper 调
 - evidence ids
 
 这些记录需要展示在 Evidence Panel 中。
+
+Phase 4.5 中，Agent 解释 API 会返回紧凑版 `tool_calls`，用于前端展示 `list_files`、`detect_framework`、`read_file`、`search_code` 和解释器步骤。

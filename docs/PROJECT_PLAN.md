@@ -113,6 +113,23 @@ CodeReader Agent 是本地可视化理解 Agent：
 - API 返回 prompt version、prompt messages、evidence 和 warnings。
 - 不把未读取源码内容伪装成证据。
 
+## Phase 4.5：可信理解闭环
+
+功能清单：
+
+- 将 evidence 从路径级扩展为可选片段级，包含行号、摘录、收集工具和收集时间。
+- 实现安全只读工具 `read_file` 和 `search_code`，默认拒绝敏感文件并防止路径穿越。
+- 增加最小 Skill Router，支持项目总览、运行方式和前端结构三个确定性 skill。
+- Web UI 展示文件树、重要文件、模块证据片段、已读取文件、工具调用、warnings 和推荐追问。
+- 对登录/API 类问题只展示候选证据和不确定提示，不声称完成完整调用链。
+
+验收标准：
+
+- Vue 和 Java 示例项目仍能完成扫描、Repo Map 和确定性解释。
+- API 返回兼容旧字段，并新增工具调用、已读取文件和片段 evidence。
+- UI 能让用户看到 Agent 读取了哪些文件、依据了哪些片段、哪些结论不确定。
+- `python -m pytest`、`python -m compileall src apps` 和前端 build 通过。
+
 ## Phase 5：专项 Skills
 
 功能清单：

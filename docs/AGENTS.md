@@ -202,3 +202,28 @@ Phase 4 先不实现完整多 Agent 编排，而是提供一个可验证的单 A
 - 不执行项目命令。
 - 不伪造 Repo Map 或 evidence。
 - 缺少 README、package scripts 或入口文件时必须返回 warning。
+
+## Phase 4.5：最小 Skill Router + 可信 Evidence
+
+Phase 4.5 仍不实现完整多 Agent 编排，但单 Agent 解读不再固定使用 `project_overview_skill`。
+
+职责：
+
+- 根据用户问题确定性选择 `project_overview_skill`、`setup_analysis_skill` 或 `frontend_analysis_skill`。
+- 通过只读工具读取配置、入口和前端结构候选文件。
+- 对登录/API 类问题只搜索候选关键词，不生成完整链路结论。
+- 返回工具调用、已读取文件、片段 evidence、warnings 和推荐追问。
+
+输出新增：
+
+- `tool_calls`
+- `read_files`
+- `suggested_questions`
+- evidence 的 `start_line`、`end_line`、`excerpt`
+
+边界：
+
+- 不调用外部 LLM。
+- 不执行被分析项目命令。
+- 不读取 `.env`、私钥、证书等敏感文件。
+- 不把候选搜索结果说成完整认证或 API 调用链。

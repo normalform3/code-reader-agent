@@ -75,6 +75,13 @@ Phase 4 最小实现：
 - 同时生成 `project_interpreter_v1` prompt messages，后续可交给真实 LLM。
 - 当前不读取 README 和源码全文，因此回答必须标明证据来自 package、文件树和入口文件扫描。
 
+Phase 4.5 更新：
+
+- `interpret_project` 不再固定只走该 skill，而是通过确定性 Skill Router 选择 project overview、setup analysis 或 frontend analysis。
+- 该 skill 仍负责默认项目总览问题。
+- 输出包含 `tool_calls`、`read_files` 和 `suggested_questions`。
+- evidence 会尽量包含行号和片段摘录。
+
 Prompt 设计：
 
 - system prompt 定义 CodeReader Agent 的角色、证据边界和回答规则。
@@ -130,6 +137,12 @@ Prompt 设计：
 
 - 如果没有 scripts，说明未找到标准启动方式。
 
+Phase 4.5 实现：
+
+- 根据“怎么运行”“启动”“构建”“build”“run”“setup”等问题触发。
+- 只基于 `package.json` scripts、包管理器 lockfile、Maven/Gradle/Spring Boot 约定和 Java 构建配置生成候选命令。
+- Java 启动命令必须说明需要用户在本地确认。
+
 ## frontend_analysis_skill
 
 适用场景：分析前端目录、组件、路由、页面。
@@ -164,6 +177,13 @@ Prompt 设计：
 - 组件目录。
 - 推荐阅读顺序。
 - 依据文件。
+
+Phase 4.5 实现：
+
+- 根据“前端”“页面”“组件”“路由”“frontend”“router”等问题触发。
+- 优先读取 `vite.config.*`、`src/main.*`、`src/App.vue`、`src/router/*`、`src/views/*`、`src/pages/*`、`src/components/*`。
+- 输出前端阅读路径和证据片段。
+- 不追踪完整页面到 API 数据流。
 
 ## auth_flow_skill
 
@@ -225,6 +245,11 @@ Prompt 设计：
 失败处理：
 
 - 如果只找到部分证据，按已找到链路回答并标记缺口。
+
+当前状态：
+
+- Phase 4.5 暂不实现完整认证链路分析。
+- 当用户询问登录、认证、权限或 token 时，只通过 `search_code` 返回候选文件和关键词证据，并明确标记尚未完成调用链追踪。
 
 ## api_flow_skill
 

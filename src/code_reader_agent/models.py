@@ -64,6 +64,10 @@ class RepoMapEvidence(BaseModel):
     path: str
     reason: str
     collected_by_tool: str
+    start_line: int | None = None
+    end_line: int | None = None
+    excerpt: str | None = None
+    collected_at: str | None = None
 
 
 class RepoMapModule(BaseModel):
@@ -108,6 +112,7 @@ class RepoMap(BaseModel):
     entrypoints: list[Entrypoint] = Field(default_factory=list)
     modules: list[RepoMapModule] = Field(default_factory=list)
     files: list[RepoMapFile] = Field(default_factory=list)
+    file_tree: list[FileTreeEntry] = Field(default_factory=list)
     dependencies: dict[str, str | None] = Field(default_factory=dict)
     routes: list[str] = Field(default_factory=list)
     api_endpoints: list[str] = Field(default_factory=list)
@@ -143,6 +148,49 @@ class EvidenceRef(BaseModel):
     path: str
     reason: str
     source: str
+    start_line: int | None = None
+    end_line: int | None = None
+    excerpt: str | None = None
+
+
+class ToolCallRecord(BaseModel):
+    """A compact record of a deterministic tool action shown in the UI."""
+
+    tool_name: str
+    input_summary: str
+    output_summary: str
+    status: Literal["success", "error"]
+    error: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+
+
+class ReadFileResult(BaseModel):
+    """Result from the safe read-only file tool."""
+
+    path: str
+    content: str
+    start_line: int
+    end_line: int
+    total_lines: int
+    truncated: bool = False
+    warnings: list[str] = Field(default_factory=list)
+
+
+class SearchCodeMatch(BaseModel):
+    """One search result from the safe code search tool."""
+
+    path: str
+    line_number: int
+    line: str
+
+
+class SearchCodeResult(BaseModel):
+    """Result from the safe code search tool."""
+
+    query: str
+    matches: list[SearchCodeMatch] = Field(default_factory=list)
+    used_backend: str
+    warnings: list[str] = Field(default_factory=list)
 
 
 class PromptMessage(BaseModel):
@@ -179,4 +227,7 @@ class ProjectInterpretationResult(BaseModel):
     setup_summary: str
     reading_path: list[ReadingPathItem]
     evidence: list[EvidenceRef]
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    read_files: list[str] = Field(default_factory=list)
+    suggested_questions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)

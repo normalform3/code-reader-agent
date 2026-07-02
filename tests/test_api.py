@@ -63,6 +63,7 @@ def test_repo_map_api_returns_modules(tmp_path: Path) -> None:
     assert {module["id"] for module in payload["modules"]} >= {"controller", "service", "repository"}
     assert payload["controllers"] == ["src/main/java/com/example/demo/UserController.java"]
     assert "pom.xml" in {item["path"] for item in payload["evidence"]}
+    assert any(item["excerpt"] for item in payload["evidence"] if item["path"] == "pom.xml")
 
 
 def test_scan_project_api_returns_clear_error_for_invalid_path(tmp_path: Path) -> None:
@@ -95,8 +96,10 @@ def test_project_interpretation_api_returns_single_agent_result(tmp_path: Path) 
     assert response.status_code == 200
     payload = response.json()
     assert payload["project_name"] == "api-summary-sample"
-    assert payload["skill"] == "project_overview_skill"
+    assert payload["skill"] == "setup_analysis_skill"
     assert payload["prompt_version"] == "project_interpreter_v1"
     assert "npm run dev" in payload["setup_summary"]
     assert payload["prompt_messages"][0]["role"] == "system"
     assert "package.json" in {item["path"] for item in payload["evidence"]}
+    assert payload["tool_calls"]
+    assert "package.json" in payload["read_files"]
