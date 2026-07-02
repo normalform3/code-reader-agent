@@ -15,6 +15,7 @@
 ## 当前接口
 
 - `POST /api/projects/scan`：已实现，接收本地项目路径，返回文件树摘要、package 信息、技术栈标签、入口文件和 warnings。
+- `POST /api/projects/import-github`：已实现，接收公开 GitHub 仓库链接，导入到本地只读缓存，返回可继续扫描的 `project_path`。
 - `POST /api/projects/repo-map`：已实现，接收本地项目路径，返回基础 Repo Map、模块、文件角色、入口、证据和 warnings。
 - `POST /api/agent/project-interpretation`：已实现，接收本地项目路径和问题，返回项目总览、启动建议、推荐阅读路径、prompt payload、证据和 warnings。
 

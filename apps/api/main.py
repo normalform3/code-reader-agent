@@ -6,10 +6,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from code_reader_agent.github_importer import GitHubCloneError, GitHubImportError, import_github_repository
 from code_reader_agent.interpreter import interpret_project
 from code_reader_agent.models import (
     AgentRunRequest,
     AgentRunResult,
+    GitHubImportRequest,
+    GitHubImportResult,
     ProjectInterpretationRequest,
     ProjectInterpretationResult,
     ProjectScanResult,
@@ -45,6 +48,18 @@ def scan_project_api(request: ProjectScanRequest) -> ProjectScanResult:
         return scan_project(request.project_path)
     except ProjectScanError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/projects/import-github", response_model=GitHubImportResult)
+def import_github_project_api(request: GitHubImportRequest) -> GitHubImportResult:
+    """Import a public GitHub repository into the local read-only cache."""
+
+    try:
+        return import_github_repository(request.github_url)
+    except GitHubImportError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except GitHubCloneError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.post("/api/projects/repo-map", response_model=RepoMap)

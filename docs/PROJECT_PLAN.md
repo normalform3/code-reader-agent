@@ -46,6 +46,7 @@ CodeReader Agent 是本地可视化理解 Agent：
 功能清单：
 
 - 创建 FastAPI 服务。
+- 支持公开 GitHub 仓库导入到本地只读缓存。
 - 提供项目扫描 API。
 - 扫描文件树。
 - 读取 `package.json`。
@@ -56,7 +57,7 @@ CodeReader Agent 是本地可视化理解 Agent：
 
 验收标准：
 
-- 用户能输入本地项目路径。
+- 用户能输入公开 GitHub 仓库链接，或使用本地项目路径。
 - API 能返回技术栈和文件树摘要。
 - Vue 项目能识别前端入口、路由、状态管理和请求封装候选位置。
 - Java 项目能识别应用入口、包结构、Controller、Service、Repository 和配置文件候选位置。

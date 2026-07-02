@@ -278,6 +278,13 @@ button:disabled {
   color: #237244;
 }
 
+.status-pill[data-status="importing"],
+.status-pill[data-status="loading"] {
+  border-color: #b9cff0;
+  background: #f2f7ff;
+  color: #245fa8;
+}
+
 .status-pill[data-status="error"] {
   border-color: #f2b6b6;
   background: #fff4f4;
@@ -471,6 +478,28 @@ code {
   font-size: 12px;
   line-height: 1.5;
   padding: 8px 9px;
+}
+
+.import-summary {
+  display: grid;
+  gap: 3px;
+  border: 1px solid #d9e3f1;
+  border-radius: 8px;
+  background: #f7faff;
+  padding: 10px;
+}
+
+.import-summary strong {
+  overflow: hidden;
+  color: #21314a;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-summary span {
+  color: #657288;
+  font-size: 12px;
 }
 
 .answer-card ol {

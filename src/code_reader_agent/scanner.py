@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
@@ -42,12 +43,46 @@ PACKAGE_MANAGER_LOCKS = (
 
 KNOWN_STACK_PACKAGES = {
     "vue": "Vue",
+    "react": "React",
+    "next": "Next.js",
     "vite": "Vite",
+    "webpack": "Webpack",
     "typescript": "TypeScript",
     "pinia": "Pinia",
+    "redux": "Redux",
+    "@reduxjs/toolkit": "Redux",
+    "zustand": "Zustand",
     "vue-router": "Vue Router",
     "axios": "Axios",
+    "express": "Express",
+    "mysql2": "MySQL",
+    "mysql": "MySQL",
+    "pg": "PostgreSQL",
+    "sqlite3": "SQLite",
+    "better-sqlite3": "SQLite",
+    "mongodb": "MongoDB",
+    "mongoose": "MongoDB",
+    "vitest": "Vitest",
+    "jest": "Jest",
+    "langchain": "LangChain",
+    "@langchain/core": "LangChain",
+    "@langchain/langgraph": "LangGraph",
     "element-plus": "Element Plus",
+}
+
+KNOWN_PYTHON_DEPENDENCIES = {
+    "fastapi": "FastAPI",
+    "pytest": "Pytest",
+    "langchain": "LangChain",
+    "langgraph": "LangGraph",
+    "llama-index": "LlamaIndex",
+    "llama_index": "LlamaIndex",
+    "chromadb": "Chroma",
+    "pymysql": "MySQL",
+    "mysqlclient": "MySQL",
+    "psycopg": "PostgreSQL",
+    "psycopg2": "PostgreSQL",
+    "pymongo": "MongoDB",
 }
 
 KNOWN_JAVA_DEPENDENCIES = {
@@ -105,7 +140,7 @@ def scan_project(project_path: str | Path) -> ProjectScanResult:
     if not package.found and not java_build.found:
         warnings.append("package.json not found; package metadata and dependency-based stack detection are unavailable.")
 
-    detected_stack = _detect_stack(package, java_build, file_tree)
+    detected_stack = _detect_stack(root, package, java_build, file_tree)
     entrypoints = _find_entrypoints(root, file_tree)
 
     return ProjectScanResult(
@@ -228,6 +263,7 @@ def _detect_package_manager(root: Path, declared_package_manager: str | None) ->
 
 
 def _detect_stack(
+    root: Path,
     package: PackageInfo,
     java_build: JavaBuildInfo,
     file_tree: list[FileTreeEntry],
@@ -252,6 +288,10 @@ def _detect_stack(
 
     if "Vite" not in {tag.name for tag in detected} and {"vite.config.ts", "vite.config.js"} & file_paths:
         detected.append(StackTag(name="Vite", source="file_tree:vite.config", confidence=0.8))
+    if "Next.js" not in {tag.name for tag in detected} and {"next.config.ts", "next.config.js", "next.config.mjs"} & file_paths:
+        detected.append(StackTag(name="Next.js", source="file_tree:next.config", confidence=0.8))
+    if "React" not in {tag.name for tag in detected} and any(path.endswith((".tsx", ".jsx")) for path in file_paths):
+        detected.append(StackTag(name="React", source="file_tree:*.tsx|*.jsx", confidence=0.65))
 
     if java_build.found:
         detected.append(StackTag(name="Java", source=_java_build_source(java_build), confidence=1.0))
@@ -271,7 +311,71 @@ def _detect_stack(
     if "Spring Boot" not in {tag.name for tag in detected} and any(path.endswith("Application.java") for path in file_paths):
         detected.append(StackTag(name="Spring Boot", source="file_tree:*Application.java", confidence=0.8))
 
+    for dependency_name, display_name in _python_dependency_names(root).items():
+        if display_name not in {tag.name for tag in detected}:
+            detected.append(StackTag(name=display_name, source=f"python_dependency:{dependency_name}", confidence=0.85))
+
+    deployment_markers = {
+        "Docker": ("Dockerfile", "docker-compose.yml", "docker-compose.yaml"),
+        "Vercel": ("vercel.json",),
+        "Netlify": ("netlify.toml",),
+        "Kubernetes": ("k8s", "kubernetes"),
+    }
+    for display_name, markers in deployment_markers.items():
+        if display_name in {tag.name for tag in detected}:
+            continue
+        if any(marker in file_paths or any(path.startswith(f"{marker}/") for path in file_paths) for marker in markers):
+            detected.append(StackTag(name=display_name, source=f"file_tree:{display_name.lower()}", confidence=0.8))
+
     return detected
+
+
+def _python_dependency_names(root: Path) -> dict[str, str]:
+    detected: dict[str, str] = {}
+    pyproject_path = root / "pyproject.toml"
+    if pyproject_path.exists():
+        try:
+            pyproject = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+        except (tomllib.TOMLDecodeError, UnicodeDecodeError):
+            pyproject = {}
+        dependencies = pyproject.get("project", {}).get("dependencies", [])
+        optional_dependencies = pyproject.get("project", {}).get("optional-dependencies", {})
+        for raw_dependency in [*dependencies, *_flatten_dependency_groups(optional_dependencies)]:
+            dependency_name = _normalize_python_dependency(raw_dependency)
+            if dependency_name in KNOWN_PYTHON_DEPENDENCIES:
+                detected[dependency_name] = KNOWN_PYTHON_DEPENDENCIES[dependency_name]
+
+    requirements_path = root / "requirements.txt"
+    if requirements_path.exists():
+        try:
+            lines = requirements_path.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            lines = []
+        for line in lines:
+            dependency_name = _normalize_python_dependency(line)
+            if dependency_name in KNOWN_PYTHON_DEPENDENCIES:
+                detected[dependency_name] = KNOWN_PYTHON_DEPENDENCIES[dependency_name]
+    return detected
+
+
+def _flatten_dependency_groups(groups: object) -> list[str]:
+    if not isinstance(groups, dict):
+        return []
+    dependencies: list[str] = []
+    for group in groups.values():
+        if isinstance(group, list):
+            dependencies.extend(item for item in group if isinstance(item, str))
+    return dependencies
+
+
+def _normalize_python_dependency(raw_dependency: object) -> str:
+    if not isinstance(raw_dependency, str):
+        return ""
+    dependency = raw_dependency.split(";", 1)[0].strip().lower()
+    match = re.match(r"([a-z0-9_.-]+)", dependency)
+    if not match:
+        return ""
+    return match.group(1).replace("_", "-")
 
 
 def _find_entrypoints(root: Path, file_tree: list[FileTreeEntry]) -> list[Entrypoint]:

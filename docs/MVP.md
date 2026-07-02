@@ -4,7 +4,7 @@
 
 第一版目标是跑通一个最小但完整的本地代码库理解闭环：
 
-用户输入一个本地 Vue 或 Java 项目路径后，CodeReader Agent 能扫描项目、识别技术栈、生成基础 Repo Map，并在 Web UI 中展示结构化结果和基于证据的回答。
+用户输入一个公开 GitHub 仓库链接或选择一个本地 Vue / Java 项目后，CodeReader Agent 能扫描项目、识别技术栈、生成基础 Repo Map，并在 Web UI 中展示结构化结果和基于证据的回答。
 
 当前 MVP 支持范围：
 
@@ -16,7 +16,7 @@
 ## MVP 用户流程
 
 1. 用户打开本地 Web UI。
-2. 用户输入一个本地项目路径。
+2. 用户输入一个公开 GitHub 仓库链接，或选择一个本地项目。
 3. 后端扫描文件树。
 4. Vue 项目读取 `package.json` 和关键配置。
 5. Java 项目读取 `pom.xml`、`build.gradle`、`settings.gradle` 等构建配置。
@@ -30,7 +30,8 @@
 
 ## MVP 功能列表
 
-- 本地项目路径输入。
+- GitHub 仓库链接输入。
+- 本地项目路径作为内部扫描契约保留。
 - 文件树扫描。
 - `package.json` 读取。
 - Java 构建配置读取。
@@ -140,7 +141,7 @@ MVP 后续增强问题：
 
 ## 验收标准
 
-- 能选择或输入一个本地 Vue 或 Java 项目路径。
+- 能输入一个公开 GitHub 仓库链接，或选择一个本地 Vue / Java 项目路径。
 - 能扫描文件树。
 - 能读取 `package.json`。
 - 能读取 Java 构建配置。

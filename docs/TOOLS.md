@@ -8,6 +8,38 @@
 
 ## 第一版工具
 
+### import_github_repository
+
+用途：把公开 GitHub 仓库导入到本地只读缓存，作为后续扫描和 Repo Map 构建的项目目录。
+
+输入：
+
+- github_url
+
+输出：
+
+- project_name
+- project_path
+- github_url
+- repository
+- reused_cache
+- warnings
+
+安全规则：
+
+- 第一版只支持 `https://github.com/owner/repo` 和 `.git` 形式的公开仓库链接。
+- 不支持 private repo、token、任意 Git host 或任意 shell 命令。
+- 使用参数列表调用 `git clone --depth 1`，不通过 shell 拼接命令。
+- clone 后只允许走现有只读扫描、读文件和搜索工具。
+- 不运行仓库内代码，不安装依赖，不执行 `npm install`、`mvn`、脚本或 Git hooks。
+- 仓库快照缓存在本地 `.codereader/repos`，重复导入时可以复用缓存。
+
+Phase 5.5 最小实现：
+
+- 由 `code_reader_agent.github_importer.import_github_repository` 提供。
+- API 入口为 `POST /api/projects/import-github`。
+- 下载完成后，前端继续用返回的 `project_path` 调用现有 Repo Map 和 Agent API。
+
 ### list_files
 
 用途：列出项目文件树。

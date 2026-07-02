@@ -8,7 +8,8 @@ from fastapi.testclient import TestClient
 
 import apps.api.main as api_main
 from apps.api.main import app
-from code_reader_agent.models import AgentRunResult, AgentStep
+from code_reader_agent.github_importer import GitHubCloneError
+from code_reader_agent.models import AgentRunResult, AgentStep, GitHubImportResult
 from tests.test_scanner import write_minimal_java_project
 
 
@@ -74,6 +75,46 @@ def test_scan_project_api_returns_clear_error_for_invalid_path(tmp_path: Path) -
 
     assert response.status_code == 400
     assert "Project path does not exist" in response.json()["detail"]
+
+
+def test_import_github_project_api_returns_cached_project(monkeypatch: Any, tmp_path: Path) -> None:
+    def fake_import_github_repository(github_url: str) -> GitHubImportResult:
+        return GitHubImportResult(
+            project_name="codex",
+            project_path=str(tmp_path / "codex"),
+            github_url=github_url,
+            repository="openai/codex",
+            reused_cache=False,
+        )
+
+    monkeypatch.setattr(api_main, "import_github_repository", fake_import_github_repository)
+
+    response = client.post("/api/projects/import-github", json={"github_url": "https://github.com/openai/codex"})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["project_name"] == "codex"
+    assert payload["repository"] == "openai/codex"
+    assert payload["project_path"] == str(tmp_path / "codex")
+
+
+def test_import_github_project_api_returns_clear_error_for_invalid_url() -> None:
+    response = client.post("/api/projects/import-github", json={"github_url": "https://example.com/openai/codex"})
+
+    assert response.status_code == 400
+    assert "Only https://github.com" in response.json()["detail"]
+
+
+def test_import_github_project_api_maps_clone_failure(monkeypatch: Any) -> None:
+    def fake_import_github_repository(github_url: str) -> GitHubImportResult:
+        raise GitHubCloneError("GitHub repository could not be cloned.")
+
+    monkeypatch.setattr(api_main, "import_github_repository", fake_import_github_repository)
+
+    response = client.post("/api/projects/import-github", json={"github_url": "https://github.com/openai/missing"})
+
+    assert response.status_code == 502
+    assert "could not be cloned" in response.json()["detail"]
 
 
 def test_project_interpretation_api_returns_single_agent_result(tmp_path: Path) -> None:

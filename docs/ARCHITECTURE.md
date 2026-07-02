@@ -71,6 +71,7 @@ Frontend UI
 Phase 1 计划 API：
 
 - `POST /api/projects/scan`
+- `POST /api/projects/import-github`
 - `POST /api/projects/repo-map`
 - `POST /api/agent/project-interpretation`
 - `POST /api/agent/questions`
@@ -83,6 +84,14 @@ Phase 1 最小实现：
 - 扫描结果使用 Pydantic model 返回，包含文件树摘要、前端 package 信息、`java_build` Java 构建配置摘要、技术栈标签、入口文件和 warnings。
 - `POST /api/projects/repo-map` 使用 `code_reader_agent.repo_map.builder.build_repo_map` 返回基础模块、文件角色、入口和 evidence。
 - 当前不实现任务队列、持久化和事件流。
+
+GitHub Import 层：
+
+- `POST /api/projects/import-github` 接收公开 GitHub 仓库链接。
+- 路由层只负责请求映射和错误映射，导入逻辑位于 `code_reader_agent.github_importer.import_github_repository`。
+- 导入层只允许 `https://github.com/owner/repo` 或 `.git` 形式，使用 `git clone --depth 1` 下载到本地 `.codereader/repos` 缓存。
+- 导入完成后返回本地缓存 `project_path`，后续 Repo Map 和 Agent 分析继续复用现有项目路径契约。
+- 导入层不运行仓库代码、不安装依赖、不执行项目脚本。
 
 Phase 4 最小实现：
 

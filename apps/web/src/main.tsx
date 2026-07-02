@@ -127,10 +127,21 @@ type Interpretation = {
   }>;
 };
 
-type Status = "empty" | "loading" | "ready" | "error";
+type GitHubImportResult = {
+  project_name: string;
+  project_path: string;
+  github_url: string;
+  repository: string;
+  reused_cache: boolean;
+  warnings: string[];
+};
+
+type Status = "empty" | "importing" | "loading" | "ready" | "error";
 
 function App() {
   const [projectPath, setProjectPath] = useState("");
+  const [githubUrl, setGithubUrl] = useState("");
+  const [githubImport, setGithubImport] = useState<GitHubImportResult | null>(null);
   const [question, setQuestion] = useState("这个项目是干什么的？我应该怎么运行，并从哪些文件开始看？");
   const [repoMap, setRepoMap] = useState<RepoMap | null>(null);
   const [interpretation, setInterpretation] = useState<Interpretation | null>(null);
@@ -163,32 +174,48 @@ function App() {
       .slice(0, 10);
   }, [repoMap]);
 
-  async function handleScan(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!projectPath.trim()) {
-      setError("请先输入本地项目路径。");
-      setStatus("error");
-      return;
-    }
-
+  async function analyzeProject(nextProjectPath: string) {
     setStatus("loading");
     setError(null);
     setInterpretation(null);
 
+    const [repoMapResult, interpretationResult] = await Promise.all([
+      postJson<RepoMap>("/api/projects/repo-map", { project_path: nextProjectPath }),
+      postJson<Interpretation>("/api/agent/run", {
+        project_path: nextProjectPath,
+        question,
+      }),
+    ]);
+    setRepoMap(repoMapResult);
+    setInterpretation(interpretationResult);
+    setSelectedModuleId(repoMapResult.modules[0]?.id ?? null);
+    setStatus("ready");
+  }
+
+  async function handleGithubImport(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!githubUrl.trim()) {
+      setError("请先输入公开 GitHub 仓库链接。");
+      setStatus("error");
+      return;
+    }
+
+    setStatus("importing");
+    setError(null);
+    setRepoMap(null);
+    setInterpretation(null);
+    setSelectedModuleId(null);
+    setGithubImport(null);
+
     try {
-      const [repoMapResult, interpretationResult] = await Promise.all([
-        postJson<RepoMap>("/api/projects/repo-map", { project_path: projectPath.trim() }),
-        postJson<Interpretation>("/api/agent/run", {
-          project_path: projectPath.trim(),
-          question,
-        }),
-      ]);
-      setRepoMap(repoMapResult);
-      setInterpretation(interpretationResult);
-      setSelectedModuleId(repoMapResult.modules[0]?.id ?? null);
-      setStatus("ready");
+      const importedProject = await postJson<GitHubImportResult>("/api/projects/import-github", {
+        github_url: githubUrl.trim(),
+      });
+      setGithubImport(importedProject);
+      setProjectPath(importedProject.project_path);
+      await analyzeProject(importedProject.project_path);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "扫描失败，请检查本地 API 是否已启动。");
+      setError(caught instanceof Error ? caught.message : "导入或分析失败，请检查 GitHub 链接和本地 API。");
       setStatus("error");
     }
   }
@@ -214,7 +241,8 @@ function App() {
 
   const statusLabel: Record<Status, string> = {
     empty: "未扫描",
-    loading: "扫描中",
+    importing: "下载中",
+    loading: "分析中",
     ready: "已完成",
     error: "出错",
   };
@@ -226,21 +254,29 @@ function App() {
           <div className="brand-mark">CR</div>
           <div>
             <h1>CodeReader</h1>
-            <p>本地代码库理解 Agent</p>
+            <p>GitHub 代码库理解 Agent</p>
           </div>
         </div>
 
-        <form className="scan-form" onSubmit={handleScan}>
-          <label htmlFor="project-path">项目路径</label>
+        <form className="scan-form" onSubmit={handleGithubImport}>
+          <label htmlFor="github-url">GitHub 仓库</label>
           <input
-            id="project-path"
-            value={projectPath}
-            onChange={(event) => setProjectPath(event.target.value)}
-            placeholder="/Users/nate/project"
+            id="github-url"
+            value={githubUrl}
+            onChange={(event) => setGithubUrl(event.target.value)}
+            placeholder="https://github.com/owner/repo"
           />
-          <button type="submit" disabled={status === "loading"}>
-            {status === "loading" ? "正在扫描..." : "扫描项目"}
+          <button type="submit" disabled={status === "importing" || status === "loading"}>
+            {status === "importing" ? "正在下载..." : status === "loading" ? "正在分析..." : "Analyze"}
           </button>
+          {githubImport ? (
+            <div className="import-summary">
+              <strong>{githubImport.repository}</strong>
+              <span>{githubImport.reused_cache ? "已复用本地缓存" : "已创建只读缓存"}</span>
+            </div>
+          ) : (
+            <p className="muted">支持公开 GitHub 仓库；系统只读取代码快照，不运行项目命令。</p>
+          )}
         </form>
 
         <SectionTitle title="技术栈" />
@@ -291,8 +327,8 @@ function App() {
         <header className="workspace-header">
           <div>
             <p className="kicker">Repo Map</p>
-            <h2>{repoMap?.project_name ?? "选择一个 Vue 或 Java 项目"}</h2>
-            <span>{repoMap?.project_path ?? "扫描本地代码仓库后，将在这里生成模块地图。"}</span>
+            <h2>{repoMap?.project_name ?? "输入公开 GitHub 仓库链接"}</h2>
+            <span>{githubImport?.github_url ?? "导入仓库快照后，将在这里生成模块地图。"}</span>
           </div>
           <div className="status-pill" data-status={status}>
             {statusLabel[status]}
@@ -359,7 +395,7 @@ function App() {
       <aside className="agent-panel">
         <SectionTitle title="Agent 面板" />
         <textarea value={question} onChange={(event) => setQuestion(event.target.value)} />
-        <button onClick={handleAsk} disabled={!projectPath.trim() || status === "loading"}>
+        <button onClick={handleAsk} disabled={!projectPath.trim() || status === "importing" || status === "loading"}>
           基于证据提问
         </button>
 
@@ -431,8 +467,17 @@ function App() {
         <EvidenceColumn
           title="工具调用"
           rows={
-            interpretation?.tool_calls.map((call) => `${call.tool_name} · ${call.status} · ${call.output_summary}`) ?? [
-              repoMap ? "build_repo_map · success · 模块地图已生成" : "等待工具调用",
+            [
+              ...(githubImport
+                ? [
+                    `import_github_repository · success · ${githubImport.reused_cache ? "复用缓存" : "下载只读快照"} · ${
+                      githubImport.repository
+                    }`,
+                  ]
+                : []),
+              ...(interpretation?.tool_calls.map((call) => `${call.tool_name} · ${call.status} · ${call.output_summary}`) ?? [
+                repoMap ? "build_repo_map · success · 模块地图已生成" : "等待工具调用",
+              ]),
             ]
           }
         />
@@ -443,7 +488,10 @@ function App() {
             ...(interpretation?.evidence.map((item) => `${item.path} - ${item.reason}`) ?? []),
           ]}
         />
-        <EvidenceColumn title="提醒" rows={[...(repoMap?.warnings ?? []), ...(interpretation?.warnings ?? [])]} />
+        <EvidenceColumn
+          title="提醒"
+          rows={[...(githubImport?.warnings ?? []), ...(repoMap?.warnings ?? []), ...(interpretation?.warnings ?? [])]}
+        />
       </section>
     </main>
   );

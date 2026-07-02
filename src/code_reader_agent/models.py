@@ -48,6 +48,44 @@ class StackTag(BaseModel):
     confidence: float = 1.0
 
 
+class ProjectSummary(BaseModel):
+    """First-screen explanation of what the repository appears to do."""
+
+    one_liner: str
+    audience: str
+    problem: str
+    confidence: float = 0.5
+    evidence: list[str] = Field(default_factory=list)
+
+
+class StackExplanation(BaseModel):
+    """A technology tag explained in terms of its likely project role."""
+
+    name: str
+    category: str
+    purpose: str
+    evidence_source: str
+    confidence: float = 1.0
+
+
+class DirectoryInsight(BaseModel):
+    """A directory-level reading hint for the overview page."""
+
+    path: str
+    role: str
+    importance: Literal["core", "supporting", "skippable"]
+    reason: str
+
+
+class ReadingRecommendation(BaseModel):
+    """A first-pass recommendation for what to read or skip."""
+
+    path: str
+    action: Literal["read_first", "skip_for_now"]
+    reason: str
+    priority: int
+
+
 class Entrypoint(BaseModel):
     """Known entrypoint file detected in the scanned project."""
 
@@ -82,6 +120,7 @@ class RepoMapModule(BaseModel):
     entry_files: list[str] = Field(default_factory=list)
     dependencies: list[str] = Field(default_factory=list)
     dependents: list[str] = Field(default_factory=list)
+    reading_priority: int = 99
     confidence: float = 1.0
     evidence: list[str] = Field(default_factory=list)
 
@@ -105,7 +144,11 @@ class RepoMap(BaseModel):
 
     project_name: str
     project_path: str
+    project_summary: ProjectSummary | None = None
     detected_stack: list[StackTag]
+    stack_explanations: list[StackExplanation] = Field(default_factory=list)
+    directory_insights: list[DirectoryInsight] = Field(default_factory=list)
+    reading_recommendations: list[ReadingRecommendation] = Field(default_factory=list)
     package_manager: str | None = None
     java_build_tool: str | None = None
     run_scripts: dict[str, str] = Field(default_factory=dict)
@@ -139,6 +182,23 @@ class ProjectScanResult(BaseModel):
     java_build: JavaBuildInfo
     detected_stack: list[StackTag]
     entrypoints: list[Entrypoint]
+    warnings: list[str] = Field(default_factory=list)
+
+
+class GitHubImportRequest(BaseModel):
+    """Input for importing a public GitHub repository into the local cache."""
+
+    github_url: str
+
+
+class GitHubImportResult(BaseModel):
+    """Result from importing a public GitHub repository for read-only analysis."""
+
+    project_name: str
+    project_path: str
+    github_url: str
+    repository: str
+    reused_cache: bool
     warnings: list[str] = Field(default_factory=list)
 
 
