@@ -230,3 +230,24 @@
 选择原因：片段级 evidence、安全只读工具、最小 Skill Router 和工作台式 UI 能直接提升用户信任，也能为后续 LLM 和 Reviewer 提供稳定输入。
 
 后续影响：Phase 4.5 只做 Vue/Java 范围内的证据增强和确定性 skill，不扩语言、不做完整调用链图、不声称完成真实多 Agent。
+
+## 为什么 Phase 5.0 先接只读 LLM Agent Loop
+
+日期：2026-07-02
+
+状态：Accepted
+
+背景：项目已经具备安全只读工具、片段级 evidence、工具调用记录和确定性 fallback。下一步需要让用户自然语言问题真正由 LLM 理解，并由 LLM 选择工具，而不是继续依赖后端关键词路由。
+
+备选方案：
+
+- 继续扩展确定性规则。
+- 直接实现多 Agent。
+- 直接开放写文件、运行命令和 Git 操作。
+- 先实现只读 LLM Agent Loop。
+
+最终选择：先实现只读 LLM Agent Loop。
+
+选择原因：只读 loop 最接近 Claude/Codex 的核心交互模型，同时复用现有安全边界和 evidence 机制，风险低于直接开放写操作或多 Agent 编排。
+
+后续影响：Phase 5.0 中 LLM 只能调用 `scan_project`、`build_repo_map`、`read_file` 和 `search_code`。写文件、shell、Git 操作继续禁止。

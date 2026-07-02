@@ -130,7 +130,29 @@ CodeReader Agent 是本地可视化理解 Agent：
 - UI 能让用户看到 Agent 读取了哪些文件、依据了哪些片段、哪些结论不确定。
 - `python -m pytest`、`python -m compileall src apps` 和前端 build 通过。
 
-## Phase 5：专项 Skills
+## Phase 5：LLM Agent Loop 与专项 Skills
+
+Phase 5 先拆成两步：先做 Phase 5.0 最小 LLM Agent Loop，再继续做 API Flow、Auth Flow 等专项 skills。
+
+## Phase 5.0：最小 LLM Agent Loop
+
+功能清单：
+
+- 接入百炼平台 `glm-5.1`，通过 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 配置。
+- 使用现有 `litellm` 依赖，不新增生产依赖。
+- 让 LLM 根据自然语言问题选择只读工具。
+- 支持 `scan_project`、`build_repo_map`、`read_file`、`search_code` 四个工具。
+- 记录每一轮 LLM 决策、工具调用、工具结果和最终回答。
+- LLM 不可用、输出不合法或超步数时降级到确定性解释。
+
+验收标准：
+
+- `/api/agent/run` 能返回 `AgentRunResult`。
+- UI 能展示 LLM Agent / Deterministic 模式、agent steps 和降级提醒。
+- 自动化测试使用 mock LLM，不依赖真实网络。
+- 只读安全边界不被 LLM 绕过。
+
+## Phase 5.1：专项 Skills
 
 功能清单：
 

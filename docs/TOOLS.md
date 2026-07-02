@@ -246,3 +246,24 @@ Java 项目优先从 Controller mapping、Service 调用、Repository/Mapper 调
 这些记录需要展示在 Evidence Panel 中。
 
 Phase 4.5 中，Agent 解释 API 会返回紧凑版 `tool_calls`，用于前端展示 `list_files`、`detect_framework`、`read_file`、`search_code` 和解释器步骤。
+
+## Phase 5.0：LLM 可调用工具白名单
+
+最小 LLM Agent Loop 只允许模型调用只读工具：
+
+- `scan_project`
+- `build_repo_map`
+- `read_file`
+- `search_code`
+
+这些工具由后端执行，LLM 只提出 tool call 请求。工具结果会回填给 LLM，并同时记录到 `tool_calls` 和 `agent_steps`。
+
+仍然禁止：
+
+- `run_command`
+- 写文件或编辑代码。
+- Git 操作。
+- 删除文件。
+- 读取敏感文件。
+
+如果 LLM 请求不在白名单内的工具，后端必须返回 tool error，并把该请求记录为 warning。

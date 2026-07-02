@@ -461,6 +461,18 @@ code {
   white-space: pre-wrap;
 }
 
+.warning-note {
+  display: block;
+  margin-top: 10px;
+  border: 1px solid #f1d08a;
+  border-radius: 7px;
+  background: #fff9eb;
+  color: #8a5a12;
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 8px 9px;
+}
+
 .answer-card ol {
   display: grid;
   gap: 10px;
@@ -509,6 +521,46 @@ code {
 .suggestion-button:hover {
   border-color: #9fbce8;
   background: #f4f8ff;
+}
+
+.step-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.step-row {
+  display: grid;
+  gap: 3px;
+  border: 1px solid #e2e8f2;
+  border-radius: 8px;
+  background: #fbfcfe;
+  padding: 9px 10px;
+}
+
+.step-row[data-status="error"] {
+  border-color: #f0b8b8;
+  background: #fff5f5;
+}
+
+.step-row span {
+  color: #657288;
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.step-row strong {
+  color: #18202f;
+  font-size: 13px;
+}
+
+.step-row small {
+  overflow: hidden;
+  color: #526178;
+  font-size: 12px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
 }
 
 .evidence-panel {

@@ -92,10 +92,13 @@ type Interpretation = {
   project_name: string;
   question: string;
   skill: string;
-  prompt_version: string;
-  overview: string;
-  setup_summary: string;
-  reading_path: ReadingPathItem[];
+  prompt_version?: string;
+  overview?: string;
+  setup_summary?: string;
+  final_answer?: string;
+  used_llm?: boolean;
+  fallback_used?: boolean;
+  reading_path?: ReadingPathItem[];
   evidence: Array<{
     path: string;
     reason: string;
@@ -114,6 +117,14 @@ type Interpretation = {
   read_files: string[];
   suggested_questions: string[];
   warnings: string[];
+  agent_steps?: Array<{
+    index: number;
+    kind: "llm" | "tool" | "final" | "fallback";
+    title: string;
+    summary: string;
+    tool_name: string | null;
+    status: "success" | "error";
+  }>;
 };
 
 type Status = "empty" | "loading" | "ready" | "error";
@@ -167,7 +178,7 @@ function App() {
     try {
       const [repoMapResult, interpretationResult] = await Promise.all([
         postJson<RepoMap>("/api/projects/repo-map", { project_path: projectPath.trim() }),
-        postJson<Interpretation>("/api/agent/project-interpretation", {
+        postJson<Interpretation>("/api/agent/run", {
           project_path: projectPath.trim(),
           question,
         }),
@@ -189,7 +200,7 @@ function App() {
     setStatus("loading");
     setError(null);
     try {
-      const result = await postJson<Interpretation>("/api/agent/project-interpretation", {
+      const result = await postJson<Interpretation>("/api/agent/run", {
         project_path: projectPath.trim(),
         question,
       });
@@ -353,20 +364,36 @@ function App() {
         </button>
 
         <div className="answer-card">
-          <p className="kicker">{interpretation?.skill ?? "project_overview_skill"}</p>
+          <p className="kicker">
+            {interpretation?.used_llm ? "LLM Agent" : "Deterministic"} · {interpretation?.skill ?? "project_overview_skill"}
+          </p>
           <h3>项目概览</h3>
-          <p>{interpretation?.overview ?? "扫描完成后，Agent 的回答会显示在这里。"}</p>
+          <p>{interpretation?.final_answer ?? interpretation?.overview ?? "扫描完成后，Agent 的回答会显示在这里。"}</p>
+          {interpretation?.fallback_used ? <span className="warning-note">LLM Agent 已降级为确定性解释。</span> : null}
         </div>
 
         <div className="answer-card">
           <h3>运行方式</h3>
-          <p>{interpretation?.setup_summary ?? "只有在配置文件提供证据时，才会展示运行命令。"}</p>
+          <p>{interpretation?.setup_summary ?? "LLM Agent 会在需要时读取配置文件，并基于证据给出运行方式。"}</p>
+        </div>
+
+        <div className="answer-card">
+          <h3>Agent Steps</h3>
+          <div className="step-list">
+            {interpretation?.agent_steps?.map((step) => (
+              <div className="step-row" data-status={step.status} key={`${step.index}-${step.title}`}>
+                <span>{step.kind}</span>
+                <strong>{step.title}</strong>
+                <small>{step.summary}</small>
+              </div>
+            )) ?? <span className="muted">LLM Agent 执行后会显示推理步骤</span>}
+          </div>
         </div>
 
         <div className="answer-card">
           <h3>阅读路径</h3>
           <ol>
-            {interpretation?.reading_path.map((item) => (
+            {interpretation?.reading_path?.map((item) => (
               <li key={`${item.order}-${item.path}`}>
                 <code>{item.path}</code>
                 <span>{item.reason}</span>

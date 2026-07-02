@@ -74,7 +74,16 @@
 - 登录/API 问题仅识别候选文件和关键词，不声称完成调用链追踪。
 - 保持 Vue / Java 为 MVP 技术栈，不在该阶段扩展 React、Next.js、FastAPI 等新栈。
 
-## Phase 5：Skills 机制增强
+## Phase 5.0：最小 LLM Agent Loop
+
+- 接入百炼平台 `glm-5.1`。
+- 使用 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 环境变量。
+- LLM 根据用户自然语言问题选择只读工具。
+- 支持 `scan_project`、`build_repo_map`、`read_file`、`search_code`。
+- 记录 agent steps、tool calls、evidence、read files 和 fallback warnings。
+- LLM 不可用或输出不合法时降级到确定性解释。
+
+## Phase 5.1：Skills 机制增强
 
 - auth flow skill。
 - api flow skill。

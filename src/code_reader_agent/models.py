@@ -231,3 +231,40 @@ class ProjectInterpretationResult(BaseModel):
     read_files: list[str] = Field(default_factory=list)
     suggested_questions: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
+
+
+class AgentRunRequest(BaseModel):
+    """Input for the minimal LLM agent loop."""
+
+    project_path: str
+    question: str = "这个项目是干什么的？我应该怎么运行，并从哪些文件开始看？"
+    max_steps: int = 6
+
+
+class AgentStep(BaseModel):
+    """One visible step in the minimal agent loop."""
+
+    index: int
+    kind: Literal["llm", "tool", "final", "fallback"]
+    title: str
+    summary: str
+    tool_name: str | None = None
+    status: Literal["success", "error"] = "success"
+
+
+class AgentRunResult(BaseModel):
+    """Result from the minimal LLM agent loop."""
+
+    project_name: str
+    question: str
+    skill: str
+    final_answer: str
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    read_files: list[str] = Field(default_factory=list)
+    suggested_questions: list[str] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+    agent_steps: list[AgentStep] = Field(default_factory=list)
+    used_llm: bool = False
+    fallback_used: bool = False
+    fallback_result: ProjectInterpretationResult | None = None

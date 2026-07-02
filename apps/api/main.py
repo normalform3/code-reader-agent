@@ -7,8 +7,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from code_reader_agent.interpreter import interpret_project
-from code_reader_agent.models import ProjectInterpretationRequest, ProjectInterpretationResult, ProjectScanResult, RepoMap
+from code_reader_agent.models import (
+    AgentRunRequest,
+    AgentRunResult,
+    ProjectInterpretationRequest,
+    ProjectInterpretationResult,
+    ProjectScanResult,
+    RepoMap,
+)
 from code_reader_agent.repo_map.builder import build_repo_map
+from code_reader_agent.runtime.agent_loop import run_agent_loop
 from code_reader_agent.scanner import ProjectScanError, scan_project
 
 
@@ -55,5 +63,15 @@ def interpret_project_api(request: ProjectInterpretationRequest) -> ProjectInter
 
     try:
         return interpret_project(request.project_path, request.question)
+    except ProjectScanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/agent/run", response_model=AgentRunResult)
+def run_agent_api(request: AgentRunRequest) -> AgentRunResult:
+    """Run the minimal read-only LLM agent loop with deterministic fallback."""
+
+    try:
+        return run_agent_loop(request.project_path, request.question, request.max_steps)
     except ProjectScanError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

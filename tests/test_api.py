@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from fastapi.testclient import TestClient
 
+import apps.api.main as api_main
 from apps.api.main import app
+from code_reader_agent.models import AgentRunResult, AgentStep
 from tests.test_scanner import write_minimal_java_project
 
 
@@ -103,3 +106,59 @@ def test_project_interpretation_api_returns_single_agent_result(tmp_path: Path) 
     assert "package.json" in {item["path"] for item in payload["evidence"]}
     assert payload["tool_calls"]
     assert "package.json" in payload["read_files"]
+
+
+def test_agent_run_api_returns_fallback_without_llm_env(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "main.ts").write_text("console.log('hello');\n", encoding="utf-8")
+    (tmp_path / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "api-agent-sample",
+                "scripts": {"dev": "vite"},
+                "dependencies": {"vue": "^3.5.0"},
+                "devDependencies": {"vite": "^5.4.0", "typescript": "^5.5.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    response = client.post(
+        "/api/agent/run",
+        json={"project_path": str(tmp_path), "question": "这个项目是干什么的？"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["project_name"] == "api-agent-sample"
+    assert payload["fallback_used"] is True
+    assert payload["used_llm"] is False
+    assert payload["agent_steps"][0]["kind"] == "fallback"
+
+
+def test_agent_run_api_returns_llm_result_with_mock(tmp_path: Path, monkeypatch: Any) -> None:
+    def fake_run_agent_loop(project_path: str, question: str, max_steps: int = 6) -> AgentRunResult:
+        return AgentRunResult(
+            project_name="mock-project",
+            question=question,
+            skill="project_overview_skill",
+            final_answer="LLM answer",
+            agent_steps=[AgentStep(index=1, kind="final", title="Final answer", summary="LLM answer")],
+            used_llm=True,
+            fallback_used=False,
+        )
+
+    monkeypatch.setattr(api_main, "run_agent_loop", fake_run_agent_loop)
+
+    response = client.post(
+        "/api/agent/run",
+        json={"project_path": str(tmp_path), "question": "介绍项目"},
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["used_llm"] is True
+    assert payload["fallback_used"] is False
+    assert payload["final_answer"] == "LLM answer"
