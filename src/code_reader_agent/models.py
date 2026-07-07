@@ -202,6 +202,99 @@ class GitHubImportResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ProjectSession(BaseModel):
+    """A local project analysis session shown in the left sidebar."""
+
+    id: str
+    title: str
+    project_name: str
+    project_path: str
+    github_url: str | None = None
+    repository: str | None = None
+    status: str = "ready"
+    last_question: str | None = None
+    last_error: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class ProjectSessionCreate(BaseModel):
+    """Input for creating or refreshing a local project session."""
+
+    project_name: str
+    project_path: str
+    title: str | None = None
+    github_url: str | None = None
+    repository: str | None = None
+    status: str = "ready"
+    last_question: str | None = None
+    last_error: str | None = None
+
+
+class ProjectSessionUpdate(BaseModel):
+    """Patchable fields for a local project session."""
+
+    title: str | None = None
+    status: str | None = None
+    last_question: str | None = None
+    last_error: str | None = None
+
+
+class RegistryItemCreate(BaseModel):
+    """Input for creating a custom tool or skill registry item."""
+
+    name: str
+    description: str = ""
+    notes: str = ""
+    details: list["RegistryDetailSection"] = Field(default_factory=list)
+    enabled: bool = True
+
+
+class RegistryItemUpdate(BaseModel):
+    """Patchable fields for tool and skill registry items."""
+
+    name: str | None = None
+    description: str | None = None
+    notes: str | None = None
+    details: list["RegistryDetailSection"] | None = None
+    enabled: bool | None = None
+
+
+class RegistryDetailSection(BaseModel):
+    """Structured detail content for a tool or skill registry item."""
+
+    title: str
+    items: list[str] = Field(default_factory=list)
+
+
+class RegistryTool(BaseModel):
+    """A tool definition visible in the local management page."""
+
+    id: str
+    name: str
+    description: str = ""
+    notes: str = ""
+    details: list[RegistryDetailSection] = Field(default_factory=list)
+    enabled: bool = True
+    builtin: bool = False
+    created_at: str
+    updated_at: str
+
+
+class RegistrySkill(BaseModel):
+    """A skill definition visible in the local management page."""
+
+    id: str
+    name: str
+    description: str = ""
+    notes: str = ""
+    details: list[RegistryDetailSection] = Field(default_factory=list)
+    enabled: bool = True
+    builtin: bool = False
+    created_at: str
+    updated_at: str
+
+
 class EvidenceRef(BaseModel):
     """A file-backed evidence pointer used by agent explanations."""
 
@@ -221,6 +314,7 @@ class ToolCallRecord(BaseModel):
     output_summary: str
     status: Literal["success", "error"]
     error: str | None = None
+    reason: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
 
 
@@ -275,6 +369,51 @@ class ReadingPathItem(BaseModel):
     reason: str
 
 
+class ProjectManualModule(BaseModel):
+    """Module explanation in the reusable first-pass project manual."""
+
+    id: str
+    name: str
+    type: str
+    responsibility: str
+    key_files: list[str] = Field(default_factory=list)
+    entry_files: list[str] = Field(default_factory=list)
+    confidence: float = 1.0
+
+
+class ProjectManualEntrypoint(BaseModel):
+    """Entrypoint explanation in the reusable first-pass project manual."""
+
+    path: str
+    kind: str
+    reason: str
+
+
+class ProjectManualDirectory(BaseModel):
+    """Directory explanation paired with the real scanned file tree."""
+
+    path: str
+    depth: int
+    role: str
+    importance: Literal["core", "supporting", "skippable"]
+    reason: str
+
+
+class ProjectManual(BaseModel):
+    """Stable first-pass project manual used before follow-up questions."""
+
+    title: str = ""
+    overview: ProjectSummary | None = None
+    technology_stack: list[StackExplanation] = Field(default_factory=list)
+    modules: list[ProjectManualModule] = Field(default_factory=list)
+    entrypoints: list[ProjectManualEntrypoint] = Field(default_factory=list)
+    directory_tree: list[FileTreeEntry] = Field(default_factory=list)
+    key_directories: list[ProjectManualDirectory] = Field(default_factory=list)
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    generated_by: str = "ProjectManualBuilder"
+
+
 class ProjectInterpretationResult(BaseModel):
     """Evidence-grounded single-agent project interpretation output."""
 
@@ -299,6 +438,7 @@ class AgentRunRequest(BaseModel):
     project_path: str
     question: str = "这个项目是干什么的？我应该怎么运行，并从哪些文件开始看？"
     max_steps: int = 6
+    project_manual_context: ProjectManual | None = None
 
 
 class AgentStep(BaseModel):
@@ -312,12 +452,189 @@ class AgentStep(BaseModel):
     status: Literal["success", "error"] = "success"
 
 
+class AnalysisPlanItem(BaseModel):
+    """One deterministic planner step for a codebase understanding task."""
+
+    order: int
+    actor: str
+    title: str
+    description: str
+    tool: str | None = None
+    expected_output: str
+    status: Literal["pending", "completed", "skipped"] = "completed"
+
+
+class ContextSnapshot(BaseModel):
+    """A compact view of the context selected for the current analysis task."""
+
+    project_context: list[str] = Field(default_factory=list)
+    task_context: list[str] = Field(default_factory=list)
+    symbol_context: list[str] = Field(default_factory=list)
+    memory_context: list[str] = Field(default_factory=list)
+    evidence_count: int = 0
+    read_files: list[str] = Field(default_factory=list)
+
+
+class ProjectReport(BaseModel):
+    """Structured project understanding report generated from tools and context."""
+
+    title: str = ""
+    project_map: str = ""
+    module_summaries: list[str] = Field(default_factory=list)
+    key_entrypoints: list[str] = Field(default_factory=list)
+    reading_route: list[ReadingPathItem] = Field(default_factory=list)
+    call_chain_candidates: list[str] = Field(default_factory=list)
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    uncertainties: list[str] = Field(default_factory=list)
+    generated_by: str = "ReportWriter"
+
+
+AskIntent = Literal[
+    "project_overview",
+    "module_explanation",
+    "file_explanation",
+    "call_chain",
+    "api_usage",
+    "configuration",
+    "tech_stack",
+]
+
+
+class ProjectMemoryOverview(BaseModel):
+    """Reusable project-level memory generated from the first report."""
+
+    positioning: str = ""
+    tech_stack: list[str] = Field(default_factory=list)
+    startup_commands: list[str] = Field(default_factory=list)
+    modules: list[str] = Field(default_factory=list)
+
+
+class ModuleMemorySummary(BaseModel):
+    """Module-level memory used by Ask mode retrieval."""
+
+    name: str
+    responsibility: str
+    entry_files: list[str] = Field(default_factory=list)
+    controller_files: list[str] = Field(default_factory=list)
+    service_files: list[str] = Field(default_factory=list)
+    view_files: list[str] = Field(default_factory=list)
+    api_files: list[str] = Field(default_factory=list)
+    related_files: list[str] = Field(default_factory=list)
+
+
+class FileMemorySummary(BaseModel):
+    """File-level memory used by Ask mode retrieval."""
+
+    path: str
+    responsibility: str
+    role: str = ""
+    symbols: list[str] = Field(default_factory=list)
+
+
+class ApiIndexEntry(BaseModel):
+    """API endpoint and frontend call index entry."""
+
+    path: str
+    method: str | None = None
+    backend_method: str | None = None
+    backend_file: str | None = None
+    frontend_calls: list[str] = Field(default_factory=list)
+
+
+class FlowIndexEntry(BaseModel):
+    """Candidate implementation flow entry."""
+
+    name: str
+    kind: str
+    steps: list[str] = Field(default_factory=list)
+    evidence_files: list[str] = Field(default_factory=list)
+    confidence: float = 0.5
+
+
+class ProjectMemory(BaseModel):
+    """Structured memory generated from the first project understanding report."""
+
+    project_id: str
+    project_name: str
+    project_path: str
+    project_memory: ProjectMemoryOverview = Field(default_factory=ProjectMemoryOverview)
+    module_summaries: list[ModuleMemorySummary] = Field(default_factory=list)
+    file_summaries: list[FileMemorySummary] = Field(default_factory=list)
+    api_index: list[ApiIndexEntry] = Field(default_factory=list)
+    flow_index: list[FlowIndexEntry] = Field(default_factory=list)
+    updated_at: str = ""
+
+
+class SessionMemoryTurn(BaseModel):
+    """One Ask mode turn remembered for follow-up questions."""
+
+    question: str
+    intent: AskIntent
+    referenced_files: list[str] = Field(default_factory=list)
+    referenced_apis: list[str] = Field(default_factory=list)
+    answer_summary: str = ""
+
+
+class SessionMemory(BaseModel):
+    """Short project session memory used by Ask mode."""
+
+    project_id: str
+    turns: list[SessionMemoryTurn] = Field(default_factory=list)
+    updated_at: str = ""
+
+
+class AskModeRequest(BaseModel):
+    """Input for the report-side Ask mode."""
+
+    project_path: str
+    question: str
+    session_memory: SessionMemory | None = None
+
+
+class AskModeResult(BaseModel):
+    """Evidence-grounded answer from Ask mode."""
+
+    project_id: str
+    project_name: str
+    question: str
+    intent: AskIntent
+    answer: str
+    related_files: list[str] = Field(default_factory=list)
+    implementation_path: list[str] = Field(default_factory=list)
+    key_code_notes: list[str] = Field(default_factory=list)
+    references: list[EvidenceRef] = Field(default_factory=list)
+    tool_calls: list[ToolCallRecord] = Field(default_factory=list)
+    trace_events: list[TraceEvent] = Field(default_factory=list)
+    session_memory: SessionMemory = Field(default_factory=lambda: SessionMemory(project_id=""))
+    warnings: list[str] = Field(default_factory=list)
+
+
+class TraceEvent(BaseModel):
+    """A visible execution trace event for the agent task."""
+
+    index: int
+    stage: str
+    title: str
+    summary: str
+    status: Literal["success", "error"] = "success"
+    tool_name: str | None = None
+
+
 class AgentRunResult(BaseModel):
     """Result from the minimal LLM agent loop."""
 
+    task_id: str = ""
     project_name: str
     question: str
     skill: str
+    analysis_goal: str = ""
+    analysis_plan: list[AnalysisPlanItem] = Field(default_factory=list)
+    selected_skills: list[str] = Field(default_factory=list)
+    context_snapshot: ContextSnapshot = Field(default_factory=ContextSnapshot)
+    project_manual: ProjectManual = Field(default_factory=ProjectManual)
+    project_memory: ProjectMemory | None = None
+    report: ProjectReport = Field(default_factory=ProjectReport)
+    trace_events: list[TraceEvent] = Field(default_factory=list)
     final_answer: str
     evidence: list[EvidenceRef] = Field(default_factory=list)
     tool_calls: list[ToolCallRecord] = Field(default_factory=list)

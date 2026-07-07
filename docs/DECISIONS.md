@@ -251,3 +251,23 @@
 选择原因：只读 loop 最接近 Claude/Codex 的核心交互模型，同时复用现有安全边界和 evidence 机制，风险低于直接开放写操作或多 Agent 编排。
 
 后续影响：Phase 5.0 中 LLM 只能调用 `scan_project`、`build_repo_map`、`read_file` 和 `search_code`。写文件、shell、Git 操作继续禁止。
+
+## 为什么 MVP 以目标驱动的代码库理解报告为主
+
+日期：2026-07-07
+
+状态：Accepted
+
+背景：如果产品只停留在“扫描 + 问答”，容易退化成 Copilot Ask 或普通代码 RAG。项目真正的差异点是 Agent 能否主动计划、调用工具、组织上下文，并把陌生代码库整理成可导航、可追踪、可复用的知识结构。
+
+备选方案：
+
+- 普通 Ask 问答工具。
+- 自动写代码 Agent。
+- 目标驱动的代码库理解报告 Agent。
+
+最终选择：目标驱动的代码库理解报告 Agent。
+
+选择原因：该方向更贴合陌生项目接手场景，也更容易展示 Planner、Tool Executor、Context Manager、Skill Registry、Analyzer、Report Writer 和 Trace Logger 的价值，同时继续保持只读安全边界。
+
+后续影响：`/api/agent/run` 是 MVP 主入口，必须返回 `task_id`、`analysis_goal`、`analysis_plan`、`selected_skills`、`context_snapshot`、`report` 和 `trace_events`。LLM 不可用时，deterministic fallback 也必须返回完整结构。

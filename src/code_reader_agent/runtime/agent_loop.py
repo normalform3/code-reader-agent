@@ -12,9 +12,11 @@ from code_reader_agent.models import (
     AgentRunResult,
     AgentStep,
     EvidenceRef,
+    ProjectManual,
     ToolCallRecord,
 )
 from code_reader_agent.repo_map.builder import build_repo_map
+from code_reader_agent.runtime.analysis import enrich_agent_run_result
 from code_reader_agent.scanner import ProjectScanError, scan_project
 from code_reader_agent.tools.read_only import ReadOnlyToolError, read_file, search_code
 from code_reader_agent.runtime.llm_client import LLMConfigurationError, LiteLLMClient
@@ -51,18 +53,22 @@ def run_agent_loop(
     question: str,
     max_steps: int = 6,
     llm_client: AgentLLMClient | None = None,
+    project_manual_context: ProjectManual | None = None,
 ) -> AgentRunResult:
     """Run a bounded read-only LLM tool-calling loop with deterministic fallback."""
 
     fallback = interpret_project(project_path, question)
     client = llm_client or LiteLLMClient()
     if llm_client is None and isinstance(client, LiteLLMClient) and not client.is_configured():
+        missing_envs = " or ".join(client.missing_environment_variables())
         return _fallback_result(
             fallback,
-            warning="Missing DASHSCOPE_API_KEY or DASHSCOPE_BASE_URL; deterministic fallback was used.",
+            project_path=project_path,
+            project_manual_context=project_manual_context,
+            warning=f"Missing {missing_envs}; deterministic fallback was used.",
         )
 
-    messages = _initial_messages(project_path, question)
+    messages = _initial_messages(project_path, question, project_manual_context)
     tool_calls: list[ToolCallRecord] = []
     agent_steps: list[AgentStep] = []
     evidence: list[EvidenceRef] = []
@@ -73,7 +79,12 @@ def run_agent_loop(
         try:
             response = client.complete(messages, AGENT_TOOL_DEFINITIONS)
         except (LLMConfigurationError, Exception) as exc:
-            return _fallback_result(fallback, warning=f"LLM agent loop failed: {exc}")
+            return _fallback_result(
+                fallback,
+                project_path=project_path,
+                project_manual_context=project_manual_context,
+                warning=f"LLM agent loop failed: {exc}",
+            )
 
         message = _extract_message(response)
         content = _message_content(message)
@@ -118,7 +129,12 @@ def run_agent_loop(
 
         parsed = _parse_final_json(content)
         if parsed is None:
-            return _fallback_result(fallback, warning="LLM final answer was not valid JSON; deterministic fallback was used.")
+            return _fallback_result(
+                fallback,
+                project_path=project_path,
+                project_manual_context=project_manual_context,
+                warning="LLM final answer was not valid JSON; deterministic fallback was used.",
+            )
 
         parsed_evidence = _parse_evidence(parsed.get("evidence", []))
         final_evidence = _dedupe_evidence([*evidence, *parsed_evidence])
@@ -133,7 +149,8 @@ def run_agent_loop(
                 summary=str(parsed.get("answer") or "").strip()[:300],
             )
         )
-        return AgentRunResult(
+        return enrich_agent_run_result(
+            project_path=project_path,
             project_name=fallback.project_name,
             question=question,
             skill=str(parsed.get("skill") or fallback.skill),
@@ -147,9 +164,15 @@ def run_agent_loop(
             used_llm=True,
             fallback_used=False,
             fallback_result=None,
+            project_manual_context=project_manual_context,
         )
 
-    return _fallback_result(fallback, warning=f"LLM agent loop exceeded max_steps={max_steps}; deterministic fallback was used.")
+    return _fallback_result(
+        fallback,
+        project_path=project_path,
+        project_manual_context=project_manual_context,
+        warning=f"LLM agent loop exceeded max_steps={max_steps}; deterministic fallback was used.",
+    )
 
 
 class _ToolResult:
@@ -168,19 +191,27 @@ class _ToolResult:
         self.warnings = warnings or []
 
 
-def _initial_messages(project_path: str, question: str) -> list[dict[str, Any]]:
+def _initial_messages(
+    project_path: str,
+    question: str,
+    project_manual_context: ProjectManual | None = None,
+) -> list[dict[str, Any]]:
+    user_content = [
+        f"project_path: {project_path}",
+        f"user_question: {question}",
+    ]
+    if project_manual_context:
+        user_content.extend(
+            [
+                "project_manual_context:",
+                json.dumps(project_manual_context.model_dump(), ensure_ascii=False),
+                "Use this manual as prior context, then call tools only for missing details.",
+            ]
+        )
+    user_content.append("Use tools to inspect the project before answering.")
     return [
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},
-        {
-            "role": "user",
-            "content": "\n".join(
-                [
-                    f"project_path: {project_path}",
-                    f"user_question: {question}",
-                    "Use tools to inspect the project before answering.",
-                ]
-            ),
-        },
+        {"role": "user", "content": "\n".join(user_content)},
     ]
 
 
@@ -326,9 +357,15 @@ def _error_tool_result(tool_name: str, input_summary: str, error: str, warning: 
     )
 
 
-def _fallback_result(fallback: Any, warning: str) -> AgentRunResult:
+def _fallback_result(
+    fallback: Any,
+    project_path: str,
+    warning: str,
+    project_manual_context: ProjectManual | None = None,
+) -> AgentRunResult:
     warnings = _dedupe_strings([*fallback.warnings, warning])
-    return AgentRunResult(
+    return enrich_agent_run_result(
+        project_path=project_path,
         project_name=fallback.project_name,
         question=fallback.question,
         skill=fallback.skill,
@@ -350,6 +387,7 @@ def _fallback_result(fallback: Any, warning: str) -> AgentRunResult:
         used_llm=False,
         fallback_used=True,
         fallback_result=fallback,
+        project_manual_context=project_manual_context,
     )
 
 

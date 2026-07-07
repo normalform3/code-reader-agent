@@ -36,25 +36,30 @@
 - 展示扫描进度。
 - 展示技术栈、文件树、模块树和项目概览。
 
-## Phase 4：项目总览问答 + onboarding 总结生成
+## Phase 4：项目总览解释 + 阅读路线生成
 
 - 实现 project overview skill。
 - 实现 setup analysis skill。
 - 实现推荐阅读路径。
-- 生成 onboarding 总结。
+- 生成确定性项目总览和阅读建议。
 - 设计 `project_interpreter_v1` 单 Agent prompt。
 - 暴露项目解读 API，返回 prompt payload、证据和确定性 fallback 结果。
 
 ## 当前实现状态
 
-截至当前版本，Phase 1-4 已形成最小闭环：
+截至当前版本，Phase 1-6.0 已形成“项目理解 + Ask 模式”MVP 雏形：
 
 - `POST /api/projects/scan` 支持 Vue/Java 基础扫描。
 - `POST /api/projects/repo-map` 支持基础 Repo Map 生成。
 - `apps/web` 提供 Vite + React + TypeScript 本地工作台原型。
 - `POST /api/agent/project-interpretation` 支持确定性项目总览、启动建议和推荐阅读路径。
 - Repo Map 和 Agent 解释支持片段级 evidence、已读取文件和工具调用记录。
-- Agent 解释已具备最小 Skill Router，可路由到项目总览、运行方式和前端结构分析。
+- `POST /api/agent/run` 支持最小只读 LLM tool loop 和 deterministic fallback。
+- Agent run 已返回 `task_id`、`analysis_goal`、`analysis_plan`、`selected_skills`、`context_snapshot`、`report` 和 `trace_events`。
+- Agent run 已返回并保存 `project_memory`。
+- `POST /api/agent/ask` 支持报告后的 Ask 模式，返回 intent、answer、related files、implementation path、references、tool calls、trace events 和 session memory。
+- Ask 模式支持项目总览、模块解释、文件解释、调用链、接口、配置和技术栈 7 类意图。
+- Skill Registry 可根据 Repo Map 技术栈选择 `CodebaseOverviewSkill`、`VueSkill` 和 `SpringBootSkill`。
 
 仍未完成：
 
@@ -62,7 +67,8 @@
 - 任务事件流和持久化任务历史。
 - 持久化扫描历史。
 - 真实 LLM provider 接入。
-- 多 Agent 编排和 Reviewer。
+- 完整多 Agent 并发编排和 Reviewer。
+- 自动修改代码、PR 生成和变更导航。
 
 ## Phase 4.5：可信理解闭环
 
@@ -70,11 +76,21 @@
 - 实现安全只读工具：`read_file` 和 `search_code`。
 - 默认拒绝读取 `.env`、私钥、证书等敏感文件，并限制路径不能越过项目根目录。
 - Web UI 展示文件树、重要文件、模块证据片段、已读取文件、工具调用和 warnings。
-- Skill Router 支持 `project_overview_skill`、`setup_analysis_skill`、`frontend_analysis_skill`。
+- Legacy Skill Router 支持 `project_overview_skill`、`setup_analysis_skill`、`frontend_analysis_skill`；MVP 主入口使用 Skill Registry 输出 `CodebaseOverviewSkill`、`VueSkill`、`SpringBootSkill`。
 - 登录/API 问题仅识别候选文件和关键词，不声称完成调用链追踪。
 - 保持 Vue / Java 为 MVP 技术栈，不在该阶段扩展 React、Next.js、FastAPI 等新栈。
 
-## Phase 5.0：最小 LLM Agent Loop
+## Phase 5.0：目标驱动 Agent 任务契约
+
+- `/api/agent/run` 作为 MVP 分析任务入口。
+- Planner 输出 `analysis_plan`。
+- Skill Registry 输出 `selected_skills`。
+- Context Manager 输出 `context_snapshot`。
+- Report Writer 输出 `report`，包含项目地图、模块说明、关键入口、阅读路线、调用链候选、证据和不确定点。
+- Trace Logger 输出 `trace_events`。
+- LLM 不可用时 deterministic fallback 仍返回完整任务结构。
+
+## Phase 5.1：最小 LLM Agent Loop
 
 - 接入百炼平台 `glm-5.1`。
 - 使用 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 环境变量。
@@ -83,34 +99,45 @@
 - 记录 agent steps、tool calls、evidence、read files 和 fallback warnings。
 - LLM 不可用或输出不合法时降级到确定性解释。
 
-## Phase 5.1：Skills 机制增强
+## Phase 5.2：Project Memory 与 Ask 模式
 
+- 从 Repo Map 和 Project Manual 生成 Project Memory。
+- 保存 Project Memory、Module Summary、File Summary、API Index 和 Flow Index。
+- Ask 模式通过 Intent Classifier、Context Retriever、Tool Planner、Evidence Collector、Answer Composer 和 Memory Updater 回答追问。
+- Ask 模式只调用只读工具，不运行项目命令，不修改代码。
+
+## Phase 6：专项 Skills 与 Reviewer
+
+- `SpringBootSkill` 增强。
+- `VueSkill` 增强。
 - auth flow skill。
 - api flow skill。
 - page data flow skill。
 - state management skill。
 - java layered architecture skill。
-
-## Phase 6：多 Agent 协作 + Reviewer + 证据追踪
-
-- Planner、Explorer、Analyzer、Writer、Reviewer 编排。
-- 展示 Agent 步骤。
 - Reviewer 检查证据和过度猜测。
 
-## Phase 7：Codebase Map 可视化增强
+## Phase 7：自动修改与变更导航（后续）
+
+- 自动修改代码。
+- PR 生成。
+- 变更导航。
+- 这些能力必须在只读理解闭环稳定后再设计。
+
+## Phase 8：Codebase Map 可视化增强
 
 - 模块关系图。
 - 调用链图。
 - 页面到 API 的数据流。
 - 登录认证流程图。
 
-## Phase 8：TUI / 桌面端体验优化
+## Phase 9：TUI / 桌面端体验优化
 
 - 评估 Tauri 或 Electron。
 - 优化本地文件选择体验。
 - 保持 Web UI 作为核心产品形态。
 
-## Phase 9：更多技术栈和真实项目 demo
+## Phase 10：更多技术栈和真实项目 demo
 
 - React。
 - Next.js。

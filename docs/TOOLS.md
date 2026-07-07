@@ -8,6 +8,53 @@
 
 ## 第一版工具
 
+MVP 的工具由 Tool Executor 统一调用，并通过 `/api/agent/run` 的 `tool_calls` 和 `trace_events` 返回给前端。工具仍保持只读边界，不运行被分析项目命令，不写文件，不执行 Git 操作。
+
+前端工具管理弹窗通过本地 registry API 展示和编辑工具元数据。该 registry 只保存 CodeReader 自己的 UI/配置状态，不会修改被分析仓库，也不会切换或重载当前项目工作台。
+
+本地状态位置：
+
+- 默认 `.codereader/state.json`
+- 可用 `CODEREADER_STATE_DIR/state.json` 覆盖
+
+内置工具：
+
+- `import_github_repository`
+- `scan_project`
+- `build_repo_map`
+- `read_file`
+- `search_code`
+- `list_files`
+- `search_symbol`
+- `parse_dependencies`
+- `parse_routes`
+- `parse_api_calls`
+- `parse_controller`
+- `parse_mapper`
+- `detect_framework`
+- `find_entrypoints`
+- `generate_doc`
+
+registry item 字段：
+
+- `name`
+- `description`
+- `notes`
+- `details`: 结构化详情分组，每组包含 `title` 和 `items`
+- `enabled`
+- `builtin`
+
+内置工具可以编辑说明、结构化详情和启用状态，但不能真正删除；删除内置工具会把它标记为 disabled。自定义工具支持新增、编辑和删除。第一版自定义工具只进入管理弹窗 registry，不会自动进入 LLM tool whitelist。
+
+内置工具的 `details` 来自当前工具文档和实现边界，包含用途、输入、输出、安全规则、实现位置和是否进入 LLM 白名单。旧 `.codereader/state.json` 中缺少 `details` 的内置项会在读取时自动补齐默认详情，同时保留用户编辑过的名称、说明、补充说明和启用状态。
+
+管理 API：
+
+- `GET /api/registry/tools`
+- `POST /api/registry/tools`
+- `PATCH /api/registry/tools/{tool_id}`
+- `DELETE /api/registry/tools/{tool_id}`
+
 ### import_github_repository
 
 用途：把公开 GitHub 仓库导入到本地只读缓存，作为后续扫描和 Repo Map 构建的项目目录。
@@ -123,6 +170,65 @@ Phase 4.5 实现：
 - 默认跳过 `.git`、`node_modules`、`dist`、`build`、虚拟环境和敏感文件。
 - 无匹配时返回空列表，不作为错误处理。
 
+### search_symbol
+
+用途：搜索类名、函数名、组件名或方法名。
+
+当前实现：
+
+- 由 `code_reader_agent.tools.read_only.search_symbol` 提供。
+- 复用 `search_code`，但限制在常见源码文件类型。
+- 用于 Ask 模式在 File Summary 无法定位时补充查找。
+
+### parse_dependencies
+
+用途：解析依赖、脚本和 Java 配置摘要。
+
+当前实现：
+
+- 由 `code_reader_agent.tools.read_only.parse_dependencies` 提供。
+- 复用 scanner 的 `package.json`、Maven、Gradle 和 Spring 配置解析。
+- 用于技术栈、配置、启动方式类 Ask 问题。
+
+### parse_routes
+
+用途：轻量提取前端路由候选。
+
+当前实现：
+
+- 由 `code_reader_agent.tools.read_only.parse_routes` 提供。
+- 通过正则读取 router/routes 文件中的 `path` 字段。
+- 不做完整 AST 路由解析。
+
+### parse_api_calls
+
+用途：提取前端接口调用候选。
+
+当前实现：
+
+- 由 `code_reader_agent.tools.read_only.parse_api_calls` 提供。
+- 提取 `axios`、`fetch`、`request` 的接口路径、方法、文件和行号候选。
+- 结果用于 API Index 和 Ask 模式“接口在哪里被调用”问题。
+
+### parse_controller
+
+用途：提取 Spring Controller 接口候选。
+
+当前实现：
+
+- 由 `code_reader_agent.tools.read_only.parse_controller` 提供。
+- 识别 `@GetMapping`、`@PostMapping`、`@RequestMapping` 等注解候选。
+- 输出接口路径、HTTP 方法、后端文件和后端方法候选。
+
+### parse_mapper
+
+用途：提取 Mapper、Repository、DAO 和 XML 映射候选。
+
+当前实现：
+
+- 由 `code_reader_agent.tools.read_only.parse_mapper` 提供。
+- 只输出候选文件和类型，不做 SQL 语义分析。
+
 ### read_config
 
 用途：读取项目配置。
@@ -215,26 +321,33 @@ Phase 1 最小实现会返回已存在的候选入口文件及其类型，为后
 
 ### generate_doc
 
-用途：生成项目导读文档。
+用途：生成项目说明书和项目解读报告。
 
 输入：
 
 - Repo Map。
 - evidence。
 - 用户问题或文档类型。
+- 可选 `project_manual_context` 仅用于 legacy/兼容分析入口；报告后的右侧追问应使用 `/api/agent/ask`。
 
 输出：
 
-- onboarding summary。
+- project manual。
+- project map。
+- module summaries。
+- key entrypoints。
+- reading route。
+- call chain candidates。
 - 依据文件。
 - 不确定点。
 
-Phase 4 最小实现：
+当前 MVP 实现：
 
-- 由 `code_reader_agent.interpreter.interpret_project` 提供单 Agent 解读结果。
-- 不调用真实 LLM，只生成版本化 prompt payload 和确定性 fallback 文本。
-- evidence 只来自扫描到的 `package.json`、文件树技术栈证据和入口文件。
-- 缺少启动脚本、package 信息或入口文件时通过 warnings 暴露。
+- 由 `code_reader_agent.runtime.analysis.build_project_report` 为 `/api/agent/run` 生成 `report`。
+- 由 `code_reader_agent.runtime.analysis.build_project_manual` 为 `/api/agent/run` 生成 `project_manual`。
+- 报告基于 Repo Map、只读工具调用、evidence、LLM/fallback 输出和 warnings。
+- 即使 LLM 不可用，也必须返回结构化 `ProjectManual` 和 `ProjectReport`。
+- 后续追问通过 `/api/agent/ask` 检索 Project Memory 和 Session Memory；缺少细节时仍通过只读工具补证据。
 
 ## 第二版工具规划
 
@@ -273,11 +386,12 @@ Java 项目优先从 Controller mapping、Service 调用、Repository/Mapper 调
 - started_at
 - ended_at
 - error
+- reason
 - evidence ids
 
-这些记录需要展示在 Evidence Panel 中。
+`reason` 用于说明为什么调用该工具，例如“用户询问指定文件，需要读取真实代码片段”或“接口问题需要提取前端调用候选”。这些记录需要展示在 Evidence Panel 或 Ask Trace 中。
 
-Phase 4.5 中，Agent 解释 API 会返回紧凑版 `tool_calls`，用于前端展示 `list_files`、`detect_framework`、`read_file`、`search_code` 和解释器步骤。
+当前 MVP 中，`/api/agent/run` 会返回紧凑版 `tool_calls` 和 `trace_events`，用于前端展示 `scan_project`、`build_repo_map`、`read_file`、`search_code`、Planner 计划、Context Snapshot 和 Report Writer 输出。
 
 ## Phase 5.0：LLM 可调用工具白名单
 

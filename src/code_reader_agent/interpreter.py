@@ -23,6 +23,7 @@ from code_reader_agent.prompts import (
     PROJECT_INTERPRETER_SYSTEM_PROMPT,
     build_project_interpreter_user_prompt,
 )
+from code_reader_agent.repo_map.builder import build_repo_map
 from code_reader_agent.scanner import scan_project
 from code_reader_agent.tools.read_only import ReadOnlyToolError, read_file, search_code
 
@@ -44,6 +45,7 @@ def interpret_scan(scan: ProjectScanResult, question: str) -> ProjectInterpretat
     """Interpret an existing scan result without reading more project files."""
 
     skill = _route_skill(question)
+    repo_map = build_repo_map(scan)
     evidence, read_files, evidence_tool_calls = _build_evidence(scan, skill)
     flow_tool_calls: list[ToolCallRecord] = []
     if _looks_like_flow_question(question):
@@ -74,7 +76,7 @@ def interpret_scan(scan: ProjectScanResult, question: str) -> ProjectInterpretat
         skill=skill,
         prompt_version=PROJECT_INTERPRETER_PROMPT_VERSION,
         prompt_messages=prompt_messages,
-        overview=_build_skill_overview(scan, skill),
+        overview=_build_skill_overview(scan, skill, repo_map),
         setup_summary=_build_setup_summary(scan),
         reading_path=reading_path,
         evidence=evidence,
@@ -99,7 +101,39 @@ def _looks_like_flow_question(question: str) -> bool:
     return any(keyword in normalized for keyword in ("登录", "认证", "权限", "接口", "api", "auth", "login", "token"))
 
 
-def _build_overview(scan: ProjectScanResult) -> str:
+def _build_overview(scan: ProjectScanResult, repo_map: object | None = None) -> str:
+    project_summary = getattr(repo_map, "project_summary", None)
+    stack_explanations = getattr(repo_map, "stack_explanations", [])
+    directory_insights = getattr(repo_map, "directory_insights", [])
+    reading_recommendations = getattr(repo_map, "reading_recommendations", [])
+    if project_summary is not None:
+        stack_lines = [
+            f"{item.name}：{item.purpose}"
+            for item in stack_explanations[:5]
+        ]
+        core_dirs = [
+            f"{item.path}：{item.role}"
+            for item in directory_insights
+            if item.importance == "core"
+        ][:5]
+        read_first = [
+            f"{item.path}：{item.reason}"
+            for item in reading_recommendations
+            if item.action == "read_first"
+        ][:5]
+        parts = [
+            f"一句话解释：{project_summary.one_liner}",
+            f"面向用户：{project_summary.audience}",
+            f"解决问题：{project_summary.problem}",
+        ]
+        if stack_lines:
+            parts.append("技术栈作用：" + " ".join(stack_lines))
+        if core_dirs:
+            parts.append("核心目录：" + " ".join(core_dirs))
+        if read_first:
+            parts.append("建议优先阅读：" + " ".join(read_first))
+        return "\n".join(parts)
+
     stack_names = [tag.name for tag in scan.detected_stack]
     if not stack_names:
         return f"{scan.project_name} 是一个本地项目；当前扫描未找到足够的技术栈证据。"
@@ -108,7 +142,7 @@ def _build_overview(scan: ProjectScanResult) -> str:
     return f"{scan.project_name} 看起来是一个基于 {stack_summary} 的项目。该判断来自 package.json、入口文件和文件树扫描。"
 
 
-def _build_skill_overview(scan: ProjectScanResult, skill: str) -> str:
+def _build_skill_overview(scan: ProjectScanResult, skill: str, repo_map: object | None = None) -> str:
     if skill == SETUP_ANALYSIS_SKILL:
         stack_summary = "、".join(tag.name for tag in scan.detected_stack) or "未知技术栈"
         return f"{scan.project_name} 的运行方式优先基于 package.json scripts 和 Java 构建配置判断；当前识别到 {stack_summary}。"
@@ -117,7 +151,7 @@ def _build_skill_overview(scan: ProjectScanResult, skill: str) -> str:
         if frontend_files:
             return f"{scan.project_name} 的前端结构可先从入口、路由、页面和组件候选文件理解。"
         return f"{scan.project_name} 当前未扫描到标准 Vue/Vite 前端结构。"
-    return _build_overview(scan)
+    return _build_overview(scan, repo_map)
 
 
 def _build_setup_summary(scan: ProjectScanResult) -> str:
@@ -251,6 +285,13 @@ def _build_evidence(scan: ProjectScanResult, skill: str) -> tuple[list[EvidenceR
             evidence.append(item)
             tool_calls.append(call)
             read_files.append(path)
+
+    readme_path = next((entry.path for entry in scan.file_tree if entry.path.lower() == "readme.md"), None)
+    if readme_path:
+        item, call = _evidence_from_file(scan.project_path, readme_path, "项目 README，可辅助判断项目一句话解释。", "read_readme")
+        evidence.append(item)
+        tool_calls.append(call)
+        read_files.append(readme_path)
 
     for path, reason, source in _skill_evidence_targets(scan, skill):
         item, call = _evidence_from_file(scan.project_path, path, reason, source)

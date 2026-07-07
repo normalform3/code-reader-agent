@@ -2,34 +2,35 @@
 
 ## 项目目标
 
-CodeReader Agent 是面向陌生代码库的本地可视化理解型 Coding Agent。它的核心价值是帮助开发者快速理解一个项目，而不是优先替用户自动写代码。
+CodeReader Agent 是面向陌生 Java Web / 前后端项目的代码库理解 Agent。它的核心价值不是替代开发者写代码，也不是做普通代码问答，而是在用户给出目标后主动制定分析计划、调用只读工具、组织上下文，并生成可导航、可追踪、可复用的项目解读报告。
 
 第一阶段重点：
 
-- 扫描项目。
-- 生成 Repo Map。
-- 展示模块、文件、入口和证据。
-- 支持基于代码证据的 Agent 解释。
-- 提供接近桌面端 Coding Agent 的本地 Web UI。
+- 输入公开 GitHub 仓库链接并创建分析任务。
+- Planner 生成分析计划。
+- Tool Executor 调用只读工具扫描项目并构建 Repo Map。
+- Context Manager 管理项目上下文、任务上下文、符号上下文和当前记忆上下文。
+- Skill Registry 根据技术栈选择 `SpringBootSkill`、`VueSkill` 或通用理解 skill。
+- Analyzer 和 Report Writer 输出项目地图、模块说明、关键入口、阅读路线和调用链候选报告。
+- Trace Logger 展示计划、工具调用、上下文更新和最终产物。
 
 ## 当前开发阶段
 
-当前处于 Phase 0：项目规划与脚手架阶段。
+当前已具备可运行 MVP 雏形：GitHub 导入、只读扫描、Repo Map、确定性解释、最小 LLM tool loop、结构化报告字段和 React/Vite 工作台。
 
 允许做：
 
-- 创建和维护文档。
-- 创建轻量目录结构。
-- 添加少量占位代码。
-- 明确 MVP 边界、架构、工具、skills、上下文和 Agent 协作方案。
+- 围绕“目标驱动的代码库理解报告”做小步增量。
+- 强化公开 GitHub 项目导入、Repo Map、分析计划、上下文快照、报告和 trace 展示。
+- 补充 Vue/Vite 与 Java/Spring Boot 的确定性识别、只读工具和证据。
+- 更新与行为变更对应的文档和测试。
 
 不要做：
 
-- 完整 Agent Loop。
-- LLM 接入。
-- 复杂前端页面。
-- 图谱引擎。
 - 自动修改代码。
+- 写文件工具、运行被分析项目命令或 Git 操作。
+- 企业级任务队列、云端多用户系统或桌面端打包。
+- 精准全量 AST 图谱和完整跨文件调用链追踪。
 - 桌面端打包。
 
 ## 产品定位规则
@@ -71,25 +72,28 @@ CodeReader Agent 是面向陌生代码库的本地可视化理解型 Coding Agen
 
 ## Agent 设计规则
 
-- Planner Agent 负责理解任务并选择 skill。
-- Explorer Agent 负责搜索、读取文件、收集证据。
-- Analyzer Agent 负责分析结构、模块关系和流程。
-- Writer Agent 负责生成结构化解释或文档。
-- Reviewer Agent 负责检查证据、遗漏和过度猜测。
+- Planner 负责把用户目标转成分析计划。
+- Tool Executor 负责执行只读工具并记录调用结果。
+- Context Manager 负责组织项目、任务、符号和当前记忆上下文。
+- Skill Registry 负责按技术栈选择 `SpringBootSkill`、`VueSkill` 或通用理解 skill。
+- Analyzer 负责基于 Repo Map、工具结果和上下文生成理解结果。
+- Report Writer 负责生成结构化项目解读报告。
+- Trace Logger 负责记录计划、工具调用、上下文更新和最终产物。
+- Reviewer 仍属于后续增强，负责检查证据、遗漏和过度猜测。
 
 不要增加没有清晰责任、终止条件和评价标准的 Agent。
 
 ## MVP 纪律
 
-第一版只支持 Vue3 / Vite / TypeScript 项目的基础理解闭环。新增能力必须服务于：
+第一版主要支持公开 GitHub 上的 Java Web / Spring Boot 与 Vue/Vite 前后端项目。新增能力必须服务于：
 
-- 扫描项目。
-- 构建 Repo Map。
-- 模块可视化。
-- Agent 解释。
-- 证据追踪。
+- 项目导入和分析任务创建。
+- Repo Map、模块说明、关键入口和阅读路线。
+- 技术栈 Skill 选择。
+- 上下文组织和证据追踪。
+- 结构化项目解读报告和 trace 展示。
 
-React、Next.js、FastAPI、Spring Boot、Express、多语言项目支持属于后续阶段。
+React、Next.js、FastAPI、Express、多语言项目支持可以作为 best-effort 识别保留，但不作为第一版核心承诺。
 
 ## 验证要求
 

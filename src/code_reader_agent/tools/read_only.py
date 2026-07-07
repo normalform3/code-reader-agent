@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import shutil
 import subprocess
 from pathlib import Path
 
-from code_reader_agent.models import ReadFileResult, SearchCodeMatch, SearchCodeResult
-from code_reader_agent.scanner import IGNORED_DIRECTORIES, ProjectScanError
+from code_reader_agent.models import FileTreeEntry, ReadFileResult, SearchCodeMatch, SearchCodeResult
+from code_reader_agent.scanner import IGNORED_DIRECTORIES, ProjectScanError, scan_project
 
 
 MAX_READ_CHARS = 12_000
@@ -85,6 +86,161 @@ def search_code(
             return result
 
     return _search_with_python(root, query, globs, max_matches)
+
+
+def list_files(project_path: str | Path, max_depth: int | None = None) -> list[FileTreeEntry]:
+    """List the safe project file tree using the scanner ignore rules."""
+
+    entries = scan_project(project_path).file_tree
+    if max_depth is None:
+        return entries
+    return [entry for entry in entries if entry.depth <= max_depth]
+
+
+def search_symbol(project_path: str | Path, symbol: str) -> SearchCodeResult:
+    """Search likely source files for a class, function, component, or method name."""
+
+    globs = [
+        "*.java",
+        "*.ts",
+        "*.tsx",
+        "*.js",
+        "*.jsx",
+        "*.vue",
+        "*.xml",
+    ]
+    return search_code(project_path, symbol, globs=globs)
+
+
+def parse_dependencies(project_path: str | Path) -> dict[str, object]:
+    """Parse dependency metadata already supported by the safe scanner."""
+
+    scan = scan_project(project_path)
+    return {
+        "package_manager": scan.package.package_manager,
+        "scripts": scan.package.scripts,
+        "frontend_dependencies": scan.package.dependencies,
+        "frontend_dev_dependencies": scan.package.dev_dependencies,
+        "java_build_tool": scan.java_build.build_tool,
+        "java_dependencies": scan.java_build.dependencies,
+        "java_config_files": scan.java_build.config_files,
+    }
+
+
+def parse_routes(project_path: str | Path) -> list[dict[str, object]]:
+    """Extract lightweight frontend route candidates from router files."""
+
+    scan = scan_project(project_path)
+    route_files = [
+        entry.path
+        for entry in scan.file_tree
+        if entry.kind == "file" and ("/router/" in entry.path.lower() or "routes" in entry.path.lower())
+    ]
+    routes: list[dict[str, object]] = []
+    for path in route_files[:20]:
+        try:
+            result = read_file(project_path, path)
+        except ReadOnlyToolError:
+            continue
+        for line_number, line in enumerate(result.content.splitlines(), start=result.start_line):
+            for match in re.finditer(r"path\s*:\s*['\"]([^'\"]+)['\"]", line):
+                routes.append({"path": match.group(1), "file": result.path, "line_number": line_number})
+    return routes
+
+
+def parse_api_calls(project_path: str | Path) -> list[dict[str, object]]:
+    """Extract lightweight frontend HTTP call candidates."""
+
+    scan = scan_project(project_path)
+    source_files = [
+        entry.path
+        for entry in scan.file_tree
+        if entry.kind == "file" and entry.path.endswith((".ts", ".tsx", ".js", ".jsx", ".vue"))
+    ]
+    calls: list[dict[str, object]] = []
+    pattern = re.compile(
+        r"(?P<client>axios|fetch|request)\s*(?:\.\s*(?P<method>get|post|put|delete|patch))?\s*\(\s*['\"](?P<path>[^'\"]+)['\"]",
+        re.IGNORECASE,
+    )
+    for path in source_files[:240]:
+        try:
+            result = read_file(project_path, path)
+        except ReadOnlyToolError:
+            continue
+        for line_number, line in enumerate(result.content.splitlines(), start=result.start_line):
+            match = pattern.search(line)
+            if not match:
+                continue
+            method = match.group("method")
+            calls.append(
+                {
+                    "path": match.group("path"),
+                    "method": method.upper() if method else None,
+                    "client": match.group("client"),
+                    "file": result.path,
+                    "line_number": line_number,
+                }
+            )
+    return calls
+
+
+def parse_controller(project_path: str | Path) -> list[dict[str, object]]:
+    """Extract lightweight Spring Controller endpoint candidates."""
+
+    scan = scan_project(project_path)
+    controller_files = [
+        entry.path
+        for entry in scan.file_tree
+        if entry.kind == "file" and entry.path.endswith("Controller.java")
+    ]
+    endpoints: list[dict[str, object]] = []
+    mapping_pattern = re.compile(
+        r"@(?P<annotation>GetMapping|PostMapping|PutMapping|DeleteMapping|PatchMapping|RequestMapping)"
+        r"(?:\s*\(\s*(?:value\s*=\s*)?['\"](?P<path>[^'\"]+)['\"])?"
+    )
+    method_pattern = re.compile(r"(?:public|private|protected)\s+[\w<>, ?]+\s+(?P<method>\w+)\s*\(")
+    for path in controller_files[:120]:
+        try:
+            result = read_file(project_path, path)
+        except ReadOnlyToolError:
+            continue
+        pending: dict[str, object] | None = None
+        for line_number, line in enumerate(result.content.splitlines(), start=result.start_line):
+            mapping = mapping_pattern.search(line)
+            if mapping:
+                annotation = mapping.group("annotation")
+                http_method = _http_method_for_mapping(annotation)
+                pending = {
+                    "path": mapping.group("path") or "",
+                    "method": http_method,
+                    "backend_file": result.path,
+                    "line_number": line_number,
+                    "backend_method": None,
+                }
+                endpoints.append(pending)
+                continue
+            if pending and pending.get("backend_method") is None:
+                method = method_pattern.search(line)
+                if method:
+                    pending["backend_method"] = method.group("method")
+    return endpoints
+
+
+def parse_mapper(project_path: str | Path) -> list[dict[str, object]]:
+    """Extract Mapper, Repository, SQL, and XML mapping candidates."""
+
+    scan = scan_project(project_path)
+    candidates = [
+        entry.path
+        for entry in scan.file_tree
+        if entry.kind == "file"
+        and (
+            entry.path.endswith(("Mapper.java", "Repository.java", "Dao.java", "Mapper.xml"))
+            or "/mapper/" in entry.path.lower()
+            or "/repository/" in entry.path.lower()
+        )
+    ]
+    return [{"path": path, "kind": _mapper_kind(path)} for path in candidates]
 
 
 def _resolve_project_root(project_path: str | Path) -> Path:
@@ -223,3 +379,25 @@ def _is_ignored_path(root: Path, path: Path) -> bool:
 def _matches_sensitive_name(path: Path) -> bool:
     name = path.name.lower()
     return name in SENSITIVE_FILE_NAMES or name.startswith(".env.") or name.endswith(SENSITIVE_SUFFIXES)
+
+
+def _http_method_for_mapping(annotation: str) -> str | None:
+    return {
+        "GetMapping": "GET",
+        "PostMapping": "POST",
+        "PutMapping": "PUT",
+        "DeleteMapping": "DELETE",
+        "PatchMapping": "PATCH",
+    }.get(annotation)
+
+
+def _mapper_kind(path: str) -> str:
+    if path.endswith("Mapper.xml"):
+        return "mapper_xml"
+    if path.endswith("Mapper.java"):
+        return "mapper"
+    if path.endswith("Repository.java"):
+        return "repository"
+    if path.endswith("Dao.java"):
+        return "dao"
+    return "mapping_candidate"

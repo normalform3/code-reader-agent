@@ -2,7 +2,12 @@
 
 ## 设计目标
 
-Context Manager 负责为 Agent 选择必要上下文。它不能把整个代码库一次性塞给模型，而是先构建索引，再按任务选择关键文件和证据。
+Context Manager 负责为代码库理解 Agent 选择和组织必要上下文。它不能把整个代码库一次性塞给模型，而是先依赖 Repo Map 和只读工具结果，再按分析任务选择关键文件、符号和证据。
+
+MVP 中 Context Manager 有两条路径：
+
+- `/api/agent/run` 返回 `context_snapshot`，用于展示首次项目理解报告使用了哪些项目上下文、任务上下文、符号上下文和当前记忆上下文。
+- `/api/agent/ask` 优先检索结构化 `ProjectMemory` 和 `SessionMemory`，再决定是否调用只读工具补充代码证据。
 
 ## 上下文类型
 
@@ -62,6 +67,26 @@ Context Manager 负责为 Agent 选择必要上下文。它不能把整个代码
 - 历史分析结果。
 - 用户选择过的模块或文件。
 
+Ask 模式已经保存短期会话记忆：
+
+- 最近问题。
+- 问题意图。
+- 引用过的文件。
+- 引用过的 API。
+- 回答摘要。
+
+这让“那这个接口在哪里调用？”这类追问可以沿用上一轮上下文。
+
+### Project Memory
+
+首次项目理解报告会沉淀结构化项目记忆：
+
+- `project_memory`：项目定位、技术栈、启动方式、模块列表。
+- `module_summaries`：模块名称、职责、入口文件、Controller / Service / View / API 文件。
+- `file_summaries`：关键文件路径、文件职责、文件角色和符号候选。
+- `api_index`：接口路径、HTTP 方法、后端方法、后端文件和前端调用位置。
+- `flow_index`：调用链或登录/auth/API 流程候选。
+
 ### Answer Context
 
 包含：
@@ -73,13 +98,37 @@ Context Manager 负责为 Agent 选择必要上下文。它不能把整个代码
 
 ## 上下文选择策略
 
-1. Planner 判断用户问题类型。
-2. Skill Router 选择 skill。
-3. Context Manager 根据 skill 从 Repo Map 选择候选模块和文件。
-4. Explorer 使用工具补充读取缺失证据。
+1. Planner 将用户目标转成分析计划。
+2. Tool Executor 调用只读工具生成扫描结果、Repo Map、文件片段和搜索结果。
+3. Skill Registry 根据 Repo Map 技术栈选择 skill。
+4. Context Manager 根据目标和 skill 组织 project context、task context、symbol context、memory context。
 5. Analyzer 使用 Evidence Context 分析。
-6. Writer 生成回答。
-7. Reviewer 检查回答是否超出 evidence。
+6. Report Writer 生成结构化项目解读报告。
+7. Trace Logger 记录上下文更新和最终产物。
+8. 后续 Reviewer 检查报告是否超出 evidence。
+
+Ask 模式选择策略：
+
+1. Intent Classifier 识别 7 类问题意图。
+2. Context Retriever 优先从 Project Memory、Module Summary、File Summary、API Index、Flow Index 和 Session Memory 检索。
+3. Tool Planner 判断上下文是否足够；不足时规划只读工具。
+4. Evidence Collector 调用 `read_file`、`search_keyword`、`parse_dependencies`、`parse_api_calls`、`parse_controller` 等只读工具。
+5. Answer Composer 输出直接回答、相关文件、候选实现路径、关键说明和参考依据。
+6. Memory Updater 写回 Session Memory。
+
+## Context Snapshot 输出
+
+```text
+context_snapshot:
+- project_context
+- task_context
+- symbol_context
+- memory_context
+- evidence_count
+- read_files
+```
+
+该结构是前端展示用的压缩快照，不替代完整 Repo Map。
 
 ## 压缩策略
 
@@ -105,3 +154,5 @@ Repo Map 应保存为结构化文件或数据库记录，方便：
 - 前端快速展示。
 - Context Manager 快速筛选文件。
 - 对比重新扫描结果。
+
+当前实现中，`ProjectMemory` 从 Repo Map 和 Project Manual 派生，并存放在 `.codereader/state.json`。Ask 回答优先使用该结构化记忆；当记忆不足时，再调用只读工具读取真实代码。

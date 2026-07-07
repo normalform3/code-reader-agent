@@ -7,15 +7,16 @@
 ```text
 Frontend UI
 -> Local API Server
+-> Local JSON State
 -> Agent Runtime
 -> Planner Agent
--> Skill Router
--> Explorer Agent
 -> Tool Executor
 -> Context Manager
+-> Skill Registry
 -> Repo Map Builder
 -> Analyzer Agent
--> Writer Agent
+-> Report Writer
+-> Trace Logger
 -> Reviewer Agent
 -> UI 展示结果
 ```
@@ -23,13 +24,25 @@ Frontend UI
 用户流程：
 
 ```text
-用户选择项目目录
--> 后端扫描文件树
--> 工具系统读取配置和关键文件
--> Repo Map Builder 生成结构化项目地图
--> Context Manager 根据用户问题选择相关上下文
--> Agent 分析并生成解释
--> 前端展示模块图、文件树、回答、证据和工具调用过程
+用户输入公开 GitHub 仓库链接
+-> 导入仓库到本地只读缓存
+-> 创建分析任务
+-> Planner 生成分析计划
+-> Tool Executor 调用只读工具扫描、读取、搜索和构建 Repo Map
+-> Context Manager 组织项目、任务、符号和当前记忆上下文
+-> Skill Registry 根据技术栈选择 skill
+-> Analyzer 生成理解结果
+-> Report Writer 输出结构化项目解读报告
+-> Trace Logger 记录计划、工具调用、上下文更新和最终产物
+-> 报告沉淀为 Project Memory
+-> 前端展示 Repo Map、报告、trace、证据和工具调用过程
+-> 用户在右侧 Ask 边栏追问
+-> Intent Classifier 识别问题类型
+-> Context Retriever 检索 Project Memory / Module Summary / File Summary / API Index / Flow Index / Session Memory
+-> Tool Planner 判断是否需要只读工具
+-> Evidence Collector 读取真实代码、配置或索引
+-> Answer Composer 生成带文件路径和依据的回答
+-> Memory Updater 更新 Session Memory
 ```
 
 第一步支持 Vue 和 Java 项目。Vue 侧优先识别 Vite 应用入口、路由、状态管理、请求封装和页面目录；Java 侧优先识别 Maven/Gradle/Spring Boot 项目入口、包结构、Controller、Service、Repository、配置文件和测试目录。
@@ -47,10 +60,12 @@ Frontend UI
 
 职责：
 
-- 项目路径输入和扫描触发。
+- 公开 GitHub 仓库链接输入和分析任务触发。
 - 展示扫描进度。
 - 展示 Project Explorer、Codebase Map、Agent Panel、Evidence Panel。
-- 展示 Repo Map、工具调用、已读取文件和回答证据。
+- 展示 ChatGPT 风格的项目会话侧边栏。
+- 通过内置弹窗展示工具管理和 Skill 管理，不切换或重载项目工作台。
+- 展示 Repo Map、Planner 计划、Skill Registry、Context Snapshot、Report、Trace Logger、工具调用、已读取文件和回答证据。
 - 通过 SSE 或 WebSocket 接收任务事件。
 
 ## Local API Server 层
@@ -64,7 +79,7 @@ Frontend UI
 
 - 提供本地 HTTP API。
 - 管理扫描任务和 Agent 任务。
-- 校验用户输入的项目路径。
+- 校验公开 GitHub 链接和内部项目路径。
 - 调用 Agent Runtime。
 - 向前端返回 Repo Map、任务状态和事件流。
 
@@ -74,8 +89,24 @@ Phase 1 计划 API：
 - `POST /api/projects/import-github`
 - `POST /api/projects/repo-map`
 - `POST /api/agent/project-interpretation`
-- `POST /api/agent/questions`
+- `POST /api/agent/run`
+- `POST /api/agent/ask`
 - `GET /api/tasks/{task_id}/events`
+
+本地会话与 registry API：
+
+- `GET /api/projects/history`
+- `POST /api/projects/history`
+- `PATCH /api/projects/history/{project_id}`
+- `DELETE /api/projects/history/{project_id}`
+- `GET /api/registry/tools`
+- `POST /api/registry/tools`
+- `PATCH /api/registry/tools/{tool_id}`
+- `DELETE /api/registry/tools/{tool_id}`
+- `GET /api/registry/skills`
+- `POST /api/registry/skills`
+- `PATCH /api/registry/skills/{skill_id}`
+- `DELETE /api/registry/skills/{skill_id}`
 
 Phase 1 最小实现：
 
@@ -93,32 +124,52 @@ GitHub Import 层：
 - 导入完成后返回本地缓存 `project_path`，后续 Repo Map 和 Agent 分析继续复用现有项目路径契约。
 - 导入层不运行仓库代码、不安装依赖、不执行项目脚本。
 
-Phase 4 最小实现：
+Phase 5 MVP 主入口：
+
+- `POST /api/agent/run` 是目标驱动分析任务入口。
+- 返回兼容旧字段的同时新增 `task_id`、`analysis_goal`、`analysis_plan`、`selected_skills`、`context_snapshot`、`report` 和 `trace_events`。
+- LLM 不可用时使用 deterministic fallback，但仍返回完整 plan、context、report 和 trace。
+- 模型层位于 `code_reader_agent.runtime.llm_client`，默认使用百炼 OpenAI-compatible `glm-5.1`，从 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 读取配置。
+- 当前不实现持久化任务队列或 SSE 事件流。
+
+Ask 模式入口：
+
+- `POST /api/agent/ask` 是报告生成后的右侧追问入口。
+- 输入 `project_path`、`question` 和可选 `session_memory`。
+- 返回 `intent`、`answer`、`related_files`、`implementation_path`、`key_code_notes`、`references`、`tool_calls`、`trace_events` 和 `session_memory`。
+- 当前支持 7 类意图：项目总览、模块解释、文件解释、调用链、接口、配置和技术栈。
+- Ask 模式只允许只读工具，不写被分析仓库，不运行项目命令，不执行 Git 操作。
+
+Legacy Phase 4 单 Agent 解读：
 
 - `POST /api/agent/project-interpretation` 基于项目路径触发一次扫描和单 Agent 解读。
 - 路由层仍只负责请求映射，解读逻辑位于 `code_reader_agent.interpreter.interpret_project`。
 - 解读结果包含 `prompt_version`、`prompt_messages`、overview、setup summary、reading path、evidence 和 warnings。
-- 当前不接真实 LLM provider；`prompt_messages` 是后续接入模型的稳定边界，API 同时返回确定性 fallback 解读。
+- 该 legacy 入口不直接调用模型；`prompt_messages` 是稳定模型输入边界，API 同时返回确定性 fallback 解读。
 
 ## Agent Runtime 层
 
 职责：
 
-- 保存 Agent State。
-- 调度 Planner、Explorer、Analyzer、Writer、Reviewer。
+- 保存 Agent State 的请求内快照。
+- 调度 Planner、Tool Executor、Context Manager、Skill Registry、Analyzer、Report Writer 和 Trace Logger。
 - 记录工具调用过程。
 - 管理任务生命周期。
 - 将中间状态发送给 UI。
 
-Phase 0 只保留目录和设计，不实现完整 runtime。
+当前 MVP runtime：
 
-Phase 4 最小单 Agent runtime：
+- 使用 `code_reader_agent.runtime.analysis` 生成 deterministic plan、skill selection、context snapshot、report 和 trace。
+- LLM loop 只允许模型选择 `scan_project`、`build_repo_map`、`read_file` 和 `search_code`。
+- 没有 LLM provider、LLM 输出非法或超过步数时，降级到 deterministic fallback。
+- fallback 仍必须返回完整分析任务结构，保证本地 demo 不依赖真实模型。
 
-- 使用 `project_overview_skill` 作为固定 skill。
-- 输入为 `ProjectScanResult`，不额外读取源码全文。
-- 生成版本化 prompt：`project_interpreter_v1`。
-- 输出确定性 onboarding 草稿，保证没有 LLM 时也能验证 API 行为。
-- 后续接入 LLM 时，应复用同一 prompt contract，并保留 deterministic fallback。
+Ask runtime：
+
+- `code_reader_agent.runtime.ask_mode` 使用 LangGraph `StateGraph` 表达节点流程。
+- 节点顺序固定为 `IntentClassifier -> ContextRetriever -> ToolPlanner -> EvidenceCollector -> AnswerComposer -> MemoryUpdater`。
+- 如果本地开发环境暂时无法安装 `langgraph`，runtime 会使用同顺序的最小 fallback 以便离线测试；生产依赖仍在 `pyproject.toml` 中声明为 `langgraph`。
+- Ask 第一版使用确定性模板组织回答，LLM 后续只能用于表达组织，不能绕过只读工具和 evidence 边界。
 
 ## Tool System 层
 
@@ -131,13 +182,33 @@ Phase 4 最小单 Agent runtime：
 
 第一版工具默认只读。
 
-## Skill System 层
+Ask 模式新增只读工具：
+
+- `list_files`
+- `search_symbol`
+- `parse_dependencies`
+- `parse_routes`
+- `parse_api_calls`
+- `parse_controller`
+- `parse_mapper`
+
+每次工具调用记录 `tool_name`、输入摘要、输出摘要、状态、错误和 `reason`，前端可展示为什么调用该工具。
+
+## Skill Registry 层
 
 职责：
 
-- 根据用户问题选择分析 skill。
+- 根据 Repo Map 和 detected stack 选择分析 skill。
 - 为不同任务定义搜索关键词、优先读取文件、上下文选择策略和输出格式。
 - 避免每个问题都从零设计分析流程。
+
+当前 MVP skill：
+
+- `CodebaseOverviewSkill`
+- `VueSkill`
+- `SpringBootSkill`
+- `ApiFlowCandidateSkill`
+- `AuthFlowCandidateSkill`
 
 ## Context Manager 层
 
@@ -145,6 +216,7 @@ Phase 4 最小单 Agent runtime：
 
 - 不把整个代码库一次性塞给模型。
 - 根据 Repo Map、用户问题和 skill 选择相关文件。
+- 输出 `ContextSnapshot`，包含 project context、task context、symbol context、memory context、evidence count 和 read files。
 - 对长文件、命令输出和历史消息做摘要压缩。
 - 保留 evidence context，支持 UI 展示和 Reviewer 检查。
 
@@ -174,10 +246,27 @@ Phase 1 最小扫描结果不是完整 Repo Map，只提供后续 Builder 需要
 
 - 保存 Repo Map。
 - 保存扫描历史。
+- 保存左侧项目会话历史。
+- 保存 tools 和 skills 的本地 registry 元数据。
 - 保存任务事件和工具调用记录。
 - 后续可用 SQLite 存储。
 
-Phase 0 不实现存储。
+当前本地状态使用 JSON 文件，不新增生产依赖：
+
+- 默认 `.codereader/state.json`
+- 可通过 `CODEREADER_STATE_DIR/state.json` 覆盖
+
+当前保存内容：
+
+- `project_sessions`：左侧历史项目会话，只保存项目元数据和内部 `project_path`，删除历史不会删除缓存仓库。
+- `tools`：内置和自定义工具元数据，包含 `details` 结构化详情；内置项不能真正删除，删除会变成禁用。
+- `skills`：内置和自定义 skill 元数据，包含 `details` 结构化详情；自定义 skill 第一版只用于管理弹窗展示，不参与 Agent 路由。
+- `project_memories`：按稳定 `project_path` hash 保存 Project Memory，包含 Project Memory、Module Summary、File Summary、API Index 和 Flow Index。
+- `session_memories`：按项目保存短期 Ask 会话记忆，用于跨轮追问。
+
+读取旧 JSON 状态时，如果内置 tool/skill 缺少 `details`，Local State 会自动补齐默认详情，并保留用户已编辑的名称、说明、补充说明和启用状态。
+
+本地 JSON 损坏时，API 返回明确错误，不静默重置，以免误丢用户配置。
 
 ## Observability / Logs 层
 
@@ -186,6 +275,7 @@ Phase 0 不实现存储。
 - 记录扫描进度。
 - 记录工具调用。
 - 记录 Agent 步骤。
+- 记录 Planner 计划、Skill Registry 结果、Context Snapshot 更新和 Report Writer 输出。
 - 记录警告、不确定结论和失败原因。
 
 这些信息需要在 Evidence Panel 中展示，方便用户判断回答是否可信。

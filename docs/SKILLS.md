@@ -2,7 +2,7 @@
 
 ## 设计目标
 
-Skill 用于把常见代码理解任务固化为可复用流程。Planner Agent 根据用户问题选择 skill，Explorer Agent 按 skill 的关键词和文件优先级收集证据，Analyzer 和 Writer 再生成结构化回答。
+Skill 用于把常见代码理解任务固化为可复用流程。MVP 中 Skill Registry 先根据 Repo Map 的技术栈选择 `CodebaseOverviewSkill`、`VueSkill`、`SpringBootSkill` 等能力，再由 Analyzer 和 Report Writer 生成结构化项目解读报告。
 
 每个 skill 都需要定义：
 
@@ -15,6 +15,80 @@ Skill 用于把常见代码理解任务固化为可复用流程。Planner Agent 
 - 输出格式。
 - 验证方式。
 - 失败处理方式。
+
+## MVP Skill Registry
+
+当前 `/api/agent/run` 的 `selected_skills` 来自 deterministic Skill Registry：
+
+- `CodebaseOverviewSkill`：默认启用，负责项目地图、模块说明、关键入口和阅读路线。
+- `VueSkill`：当 Repo Map 检测到 Vue、Vite、Vue Router 或 Pinia 时启用。
+- `SpringBootSkill`：当 Repo Map 检测到 Java、Maven、Gradle、Spring Boot、Spring Web 或 Spring Security 时启用。
+- `ApiFlowCandidateSkill`：当 Repo Map 有接口候选时启用，只输出候选证据。
+- `AuthFlowCandidateSkill`：当 Repo Map 有认证候选时启用，只输出候选证据。
+
+MVP 不实现插件式动态 skill 加载，也不声称完成精准调用链追踪。
+
+## Ask Intent 与 Skill 关系
+
+Ask 模式先做问题意图分类，再选择上下文和只读工具。当前支持：
+
+- `project_overview`：优先检索 Project Memory。
+- `module_explanation`：检索 Module Summary、API Index 和相关 File Summary。
+- `file_explanation`：定位 File Summary，必要时调用 `read_file`。
+- `call_chain`：检索 Flow Index，并读取关键文件补证据。
+- `api_usage`：检索 API Index，并调用 `parse_api_calls`、`parse_controller` 或 `search_keyword`。
+- `configuration`：检索配置文件和依赖摘要，并调用 `parse_dependencies`。
+- `tech_stack`：检索依赖文件和 Project Memory。
+
+这些 intent 不替代 `VueSkill`、`SpringBootSkill` 等技术栈 skill；它们负责 Ask 模式的路由和上下文选择。技术栈 skill 仍负责决定哪些文件、关键词和证据更值得优先读取。
+
+前端 Skill 管理弹窗通过本地 registry API 展示和编辑 skill 元数据。该 registry 保存到 `.codereader/state.json`，也可以通过 `CODEREADER_STATE_DIR/state.json` 覆盖。
+
+内置 skill：
+
+- `CodebaseOverviewSkill`
+- `VueSkill`
+- `SpringBootSkill`
+- `ApiFlowCandidateSkill`
+- `AuthFlowCandidateSkill`
+- `project_overview_skill`
+- `setup_analysis_skill`
+- `frontend_analysis_skill`
+
+管理规则：
+
+- registry item 字段包含 `name`、`description`、`notes`、`details`、`enabled` 和 `builtin`。
+- `details` 是结构化详情分组，每组包含 `title` 和 `items`。
+- 内置 skill 可以编辑说明、适用说明、结构化详情和启用状态。
+- 内置 skill 不能真正删除；删除动作会将其禁用。
+- 自定义 skill 支持新增、编辑和删除。
+- 第一版自定义 skill 只进入管理弹窗 registry，不会自动参与 Agent 路由或 LLM tool loop。
+- 内置 skill 的 `details` 来自当前 skill 文档和运行时边界，包含适用场景、触发条件、优先读取文件、可用 tools、输出格式、验证方式和失败处理。
+- 旧 `.codereader/state.json` 中缺少 `details` 的内置项会在读取时自动补齐默认详情，同时保留用户编辑过的名称、说明、补充说明和启用状态。
+
+管理 API：
+
+- `GET /api/registry/skills`
+- `POST /api/registry/skills`
+- `PATCH /api/registry/skills/{skill_id}`
+- `DELETE /api/registry/skills/{skill_id}`
+
+## CodebaseOverviewSkill
+
+适用场景：用户要求生成项目解读报告、项目地图、模块说明、关键入口和阅读路线。
+
+输出格式：
+
+- project manual。
+- project map。
+- module summaries。
+- key entrypoints。
+- reading route。
+- call chain candidates。
+- evidence。
+- uncertainties。
+
+当前实现：由 `code_reader_agent.runtime.analysis.build_project_manual` 和 `build_project_report` 基于 Repo Map 和 Agent 输出生成。首次分析返回 `project_manual` 和 `project_memory`，后续追问通过 `/api/agent/ask` 使用 Project Memory 和 Session Memory。
 
 ## project_overview_skill
 

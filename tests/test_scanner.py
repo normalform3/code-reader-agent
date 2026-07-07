@@ -190,3 +190,21 @@ def test_scan_ignores_node_modules(tmp_path: Path) -> None:
     result = scan_project(tmp_path)
 
     assert all(not entry.path.startswith("node_modules") for entry in result.file_tree)
+
+
+def test_scan_detects_extended_python_and_deployment_stack(tmp_path: Path) -> None:
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("from fastapi import FastAPI\n", encoding="utf-8")
+    (tmp_path / "Dockerfile").write_text("FROM python:3.12\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """[project]
+name = "python-agent"
+dependencies = ["fastapi>=0.115", "langgraph>=0.2", "pytest>=8"]
+""",
+        encoding="utf-8",
+    )
+
+    result = scan_project(tmp_path)
+
+    stack_names = {tag.name for tag in result.detected_stack}
+    assert {"FastAPI", "LangGraph", "Pytest", "Docker"} <= stack_names

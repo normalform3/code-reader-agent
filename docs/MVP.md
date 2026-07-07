@@ -2,31 +2,30 @@
 
 ## MVP 目标
 
-第一版目标是跑通一个最小但完整的本地代码库理解闭环：
+第一版目标是跑通一个最小但完整的目标驱动代码库理解闭环：
 
-用户输入一个公开 GitHub 仓库链接或选择一个本地 Vue / Java 项目后，CodeReader Agent 能扫描项目、识别技术栈、生成基础 Repo Map，并在 Web UI 中展示结构化结果和基于证据的回答。
+用户输入一个公开 GitHub 仓库链接后，CodeReader Agent 创建分析任务，由 Planner 生成分析计划，Tool Executor 调用只读工具，Context Manager 组织上下文，Skill Registry 选择技术栈 skill，Analyzer 生成理解结果，Report Writer 输出结构化项目解读报告，Trace Logger 记录全过程。本地项目路径只作为内部扫描契约和开发调试能力保留。
 
 当前 MVP 支持范围：
 
 - Vue：优先覆盖 Vue3 / Vite / TypeScript 项目，识别路由、状态管理、请求封装和页面目录。
 - Java：优先覆盖 Maven / Gradle / Spring Boot 项目，识别应用入口、包结构、Controller、Service、Repository、配置文件和测试目录。
 
-当前实现已跑通 Phase 1-4 最小闭环：本地扫描、基础 Repo Map、React/Vite 工作台、确定性项目解读和基础测试。下一步属于 Phase 4.5，重点不是扩展语言或接入真实 LLM，而是提升 evidence 粒度、只读工具安全性和 UI 可验证性。
+当前实现已跑通 MVP 雏形：公开 GitHub 导入、本地扫描、基础 Repo Map、React/Vite 工作台、确定性项目解读、最小只读 LLM tool loop、结构化报告字段和基础测试。下一步重点不是扩展语言或开放写代码能力，而是稳定 plan、context、report、trace 和 evidence 的展示质量。
 
 ## MVP 用户流程
 
 1. 用户打开本地 Web UI。
-2. 用户输入一个公开 GitHub 仓库链接，或选择一个本地项目。
-3. 后端扫描文件树。
-4. Vue 项目读取 `package.json` 和关键配置。
-5. Java 项目读取 `pom.xml`、`build.gradle`、`settings.gradle` 等构建配置。
-6. 系统识别技术栈、启动命令和入口文件。
-7. 系统生成基础 Repo Map。
-8. UI 展示技术栈、文件树、模块树、项目概览和工具调用记录。
-9. 用户提问项目总览、运行方式或阅读顺序。
-10. Agent 基于已读取文件回答，并展示依据文件。
-11. 用户继续追问接口调用链、登录认证流程或状态管理逻辑。
-12. 用户生成简单 onboarding 总结。
+2. 用户输入一个公开 GitHub 仓库链接。
+3. 系统导入仓库到本地只读缓存并创建分析任务。
+4. Planner 生成分析计划。
+5. Tool Executor 调用 `scan_project`、`build_repo_map`、`read_file`、`search_code` 等只读工具。
+6. Context Manager 组织项目上下文、任务上下文、符号上下文和当前记忆上下文。
+7. Skill Registry 根据技术栈选择 `CodebaseOverviewSkill`、`VueSkill`、`SpringBootSkill` 等 skill。
+8. Analyzer 基于 Repo Map、工具结果和 evidence 生成理解结果。
+9. Report Writer 输出项目地图、模块说明、关键入口、阅读路线、调用链候选和不确定点。
+10. Trace Logger 记录计划、工具调用、上下文更新和最终产物。
+11. UI 展示 Repo Map、结构化报告、trace、工具调用和 evidence。
 
 ## MVP 功能列表
 
@@ -50,10 +49,15 @@
 - 模块树展示。
 - 项目概览展示。
 - 模块详情展示。
-- Agent 对话区域。
+- 分析目标输入区域。
+- Planner 计划展示。
+- Skill Registry 选择结果。
+- Context Snapshot 展示。
+- 结构化项目解读报告。
+- Trace Logger 执行轨迹。
 - 已读取文件列表。
 - 工具调用记录。
-- 简单 onboarding 总结。
+- 项目地图、模块说明、关键入口、阅读路线和调用链候选报告。
 - 片段级 evidence 展示。
 - 已读取文件展示。
 - 推荐追问展示。
@@ -69,11 +73,14 @@ MVP UI 包括：
 - 模块树。
 - 项目概览卡片。
 - 模块详情。
-- Agent 对话框。
-- 当前使用 skill 展示。
+- 分析目标输入框。
+- Planner 计划展示。
+- Skill Registry 选择结果。
+- Context Snapshot 展示。
+- 结构化项目解读报告。
+- Trace Logger 展示。
 - 已读取文件列表。
 - 工具调用记录。
-- onboarding 总结展示。
 
 ## MVP 后端能力
 
@@ -82,7 +89,7 @@ MVP UI 包括：
 - 扫描目录，过滤常见无关目录，例如 `node_modules`、`.git`、`dist`。
 - 读取配置文件。
 - 生成基础 Repo Map。
-- 提供任务事件给前端展示。
+- 返回分析计划、上下文快照、结构化报告和 trace events 给前端展示。
 
 Phase 1 最小后端扫描闭环先实现：
 
@@ -97,21 +104,24 @@ Phase 1 最小后端扫描闭环先实现：
 - 识别 `src/main/java/**/Application.java`、`src/main/resources/application.yml`、`src/main/resources/application.properties`、`pom.xml`、`build.gradle` 等 Java 入口和配置文件。
 - 返回 warnings，例如 Vue 项目缺少 `package.json`、Java 项目缺少构建配置或配置解析失败。
 
-完整任务事件流、持久化扫描历史、真实 LLM provider 和多 Agent 编排仍属于后续步骤。
+持久化任务事件流、持久化扫描历史、完整多 Agent 并发、Reviewer 校验和精准 AST 级调用链仍属于后续步骤。
 
 ## MVP Agent 能力
 
-MVP 只需要支持三类问题：
+MVP 的主目标不是普通 Ask 问答，而是围绕用户目标生成结构化代码库理解报告。默认目标包括：
 
-- 这个项目是干什么的？
-- 这个项目怎么运行？
-- 我应该从哪些文件开始看？
+- 项目地图。
+- 模块说明。
+- 关键入口。
+- 阅读路线。
+- 调用链候选。
+- evidence 和不确定点。
 
-Phase 4.5 最小 Skill Router 会把问题确定性路由到：
+最小 Skill Registry 会根据技术栈选择：
 
-- `project_overview_skill`：项目总览、模块和阅读路径。
-- `setup_analysis_skill`：安装、启动、构建和测试命令候选。
-- `frontend_analysis_skill`：Vue/Vite 入口、路由、页面和组件候选。
+- `CodebaseOverviewSkill`：项目总览、模块和阅读路径。
+- `VueSkill`：Vue/Vite 入口、路由、页面和组件候选。
+- `SpringBootSkill`：Java/Spring Boot 入口、Controller、Service、Repository 和配置候选。
 
 MVP 后续增强问题：
 
@@ -137,11 +147,11 @@ MVP 后续增强问题：
 - 不做云端账号系统。
 - 不做桌面端打包。
 - 不支持所有语言和框架，第一步只支持 Vue 和 Java 的常见项目结构。
-- 不实现复杂多 Agent 编排。
+- 不实现复杂多 Agent 并发编排或持久化任务队列。
 
 ## 验收标准
 
-- 能输入一个公开 GitHub 仓库链接，或选择一个本地 Vue / Java 项目路径。
+- 能输入一个公开 GitHub 仓库链接；本地 Vue / Java 项目路径只作为内部扫描契约保留。
 - 能扫描文件树。
 - 能读取 `package.json`。
 - 能读取 Java 构建配置。
@@ -150,8 +160,5 @@ MVP 后续增强问题：
 - 能生成基础 Repo Map。
 - 能在 UI 中展示技术栈、文件树、模块树。
 - 能点击模块查看说明和关键文件。
-- 能回答“这个项目是干什么的？”
-- 能回答“这个项目怎么运行？”
-- 能回答“我应该从哪些文件开始看？”
-- 能展示回答依据文件。
-- 能生成简单 onboarding 总结。
+- 能返回 `task_id`、`analysis_goal`、`analysis_plan`、`selected_skills`、`context_snapshot`、`report` 和 `trace_events`。
+- 能展示 Planner 计划、Skill Registry、Context Snapshot、结构化项目解读报告、Trace Logger 和依据文件。
