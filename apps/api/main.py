@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib.util
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,7 +20,9 @@ from code_reader_agent.local_state import (
     list_project_sessions,
     list_skills,
     list_tools,
+    get_model_settings,
     save_project_memory,
+    update_model_settings,
     update_project_session,
     update_skill,
     update_tool,
@@ -31,6 +35,9 @@ from code_reader_agent.models import (
     AskModeResult,
     GitHubImportRequest,
     GitHubImportResult,
+    ModelConnectionTestResult,
+    ModelSettingsStatus,
+    ModelSettingsUpdate,
     ProjectInterpretationRequest,
     ProjectInterpretationResult,
     ProjectScanResult,
@@ -46,6 +53,7 @@ from code_reader_agent.models import (
 from code_reader_agent.runtime.ask_mode import run_ask_mode
 from code_reader_agent.repo_map.builder import build_repo_map
 from code_reader_agent.runtime.agent_loop import run_agent_loop
+from code_reader_agent.runtime.llm_client import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL_ENV, LLMConfigurationError, LiteLLMClient
 from code_reader_agent.scanner import ProjectScanError, scan_project
 
 
@@ -219,6 +227,64 @@ def delete_registry_skill_api(skill_id: str) -> RegistrySkill | None:
         raise _state_http_error(exc) from exc
 
 
+@app.get("/api/model-settings", response_model=ModelSettingsStatus)
+def get_model_settings_api() -> ModelSettingsStatus:
+    """Return Bailian model settings and local runtime status."""
+
+    try:
+        return _model_settings_status()
+    except LocalStateError as exc:
+        raise _state_http_error(exc) from exc
+
+
+@app.post("/api/model-settings", response_model=ModelSettingsStatus)
+def update_model_settings_api(request: ModelSettingsUpdate) -> ModelSettingsStatus:
+    """Update Bailian model name used by Agent and Ask mode."""
+
+    try:
+        update_model_settings(request)
+        return _model_settings_status()
+    except LocalStateError as exc:
+        raise _state_http_error(exc) from exc
+
+
+@app.post("/api/model-settings/test", response_model=ModelConnectionTestResult)
+def test_model_settings_api() -> ModelConnectionTestResult:
+    """Run a minimal Bailian connectivity test without exposing secrets."""
+
+    try:
+        settings = get_model_settings()
+    except LocalStateError as exc:
+        raise _state_http_error(exc) from exc
+
+    client = LiteLLMClient(model=settings.model)
+    missing = client.missing_environment_variables()
+    if missing:
+        return ModelConnectionTestResult(
+            ok=False,
+            model=client.config.model,
+            message=f"Missing required environment variables: {', '.join(missing)}.",
+            missing_environment=missing,
+        )
+
+    try:
+        response = client.complete(
+            [{"role": "user", "content": "只回复 OK，用于连通性测试。"}],
+            tools=[],
+        )
+    except LLMConfigurationError as exc:
+        return ModelConnectionTestResult(ok=False, model=client.config.model, message=str(exc))
+    except Exception as exc:
+        return ModelConnectionTestResult(ok=False, model=client.config.model, message=f"Model connection failed: {exc}")
+
+    return ModelConnectionTestResult(
+        ok=True,
+        model=client.config.model,
+        message="Bailian model connection succeeded.",
+        response_preview=_extract_text_preview(response),
+    )
+
+
 @app.post("/api/agent/project-interpretation", response_model=ProjectInterpretationResult)
 def interpret_project_api(request: ProjectInterpretationRequest) -> ProjectInterpretationResult:
     """Generate a Phase 4 single-agent project interpretation."""
@@ -273,3 +339,37 @@ def _state_http_error(exc: LocalStateError) -> HTTPException:
     if "not found" in message:
         return HTTPException(status_code=404, detail=message)
     return HTTPException(status_code=500, detail=message)
+
+
+def _model_settings_status() -> ModelSettingsStatus:
+    settings = get_model_settings()
+    client = LiteLLMClient(model=settings.model)
+    missing = set(client.missing_environment_variables())
+    return ModelSettingsStatus(
+        provider="bailian",
+        model=client.config.model,
+        api_key_env=DEFAULT_API_KEY_ENV,
+        base_url_env=DEFAULT_BASE_URL_ENV,
+        api_key_configured=DEFAULT_API_KEY_ENV not in missing,
+        base_url_configured=DEFAULT_BASE_URL_ENV not in missing,
+        litellm_installed=importlib.util.find_spec("litellm") is not None,
+        langgraph_installed=importlib.util.find_spec("langgraph") is not None,
+        updated_at=settings.updated_at,
+    )
+
+
+def _extract_text_preview(response: object) -> str:
+    content = ""
+    if isinstance(response, dict):
+        choices = response.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if isinstance(message, dict) and isinstance(message.get("content"), str):
+                content = message["content"]
+    else:
+        choices = getattr(response, "choices", None)
+        if choices:
+            message = getattr(choices[0], "message", None)
+            value = getattr(message, "content", None)
+            content = value if isinstance(value, str) else ""
+    return content.strip()[:240]

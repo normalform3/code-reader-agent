@@ -8,31 +8,45 @@
 
 ## 第一版工具
 
-MVP 的工具由 Tool Executor 统一调用，并通过 `/api/agent/run` 的 `tool_calls` 和 `trace_events` 返回给前端。工具仍保持只读边界，不运行被分析项目命令，不写文件，不执行 Git 操作。
+MVP 的工具由 Tool Executor 统一调用，并通过 `/api/agent/run` 或 `/api/agent/ask` 的 `tool_calls` 和 `trace_events` 返回给前端。工具仍保持只读边界，不运行被分析项目命令，不写文件，不执行 Git 操作。
 
-前端工具管理弹窗通过本地 registry API 展示和编辑工具元数据。该 registry 只保存 CodeReader 自己的 UI/配置状态，不会修改被分析仓库，也不会切换或重载当前项目工作台。
+当前有两类 registry，需要区分：
+
+- 运行时 Tool Registry：代码里的安全执行层，决定 Ask 模式真正能调用哪些工具，并保存 permission、risk level、mode、schema、timeout 和 handler。
+- 前端工具管理 registry：通过本地 registry API 展示和编辑工具元数据。该 registry 只保存 CodeReader 自己的 UI/配置状态，不会修改被分析仓库，也不会切换或重载当前项目工作台。
+
+Ask 模式只允许运行时 Tool Registry 中 `permission=read`、`risk_level=safe` 且 `available_in_modes` 包含 `ask` 的工具。Agent 不允许绕过 Tool Executor 直接调用底层工具函数。
 
 本地状态位置：
 
 - 默认 `.codereader/state.json`
 - 可用 `CODEREADER_STATE_DIR/state.json` 覆盖
 
-内置工具：
+运行时和管理界面涉及的内置工具：
 
 - `import_github_repository`
 - `scan_project`
 - `build_repo_map`
 - `read_file`
+- `read_file_chunk`
+- `get_file_metadata`
 - `search_code`
 - `search_keyword`
 - `search_api_path`
+- `search_file_by_name`
 - `list_files`
 - `search_symbol`
 - `parse_dependencies`
+- `parse_package_scripts`
 - `parse_routes`
 - `parse_api_calls`
 - `parse_controller`
 - `parse_mapper`
+- `query_project_memory`
+- `query_code_index`
+- `query_api_index`
+- `query_flow_index`
+- `query_symbol_index`
 - `detect_framework`
 - `find_entrypoints`
 - `generate_doc`

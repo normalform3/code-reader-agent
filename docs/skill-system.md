@@ -11,7 +11,7 @@ Skill 是 CodeReader Agent 的技术栈级代码理解插件。它不是 prompt 
 - `scan(repo_map)`：只读扫描和轻量解析结果。
 - Code Knowledge Index 写入逻辑：file summaries、API index、symbol index、flow index、route index 等。
 - `get_query_hints()`：Ask 检索提示。
-- `plan_tools()`：Ask 只读工具建议。
+- `plan_tools()`：Ask 只读工具建议，只生成 `PlannedToolCall`，不直接执行工具。
 - `get_answer_prompt()`：回答组织提示。
 
 ## Skill 与 Code Knowledge Index
@@ -30,7 +30,7 @@ Skill 扫描结果会写入 `ProjectMemory` 的 Code Knowledge Index，而不是
 - Data Model Index。
 - Mapper Relation 候选。
 
-Ask 模式优先检索这些结构化索引。索引不足或问题涉及具体实现时，仍然通过只读工具读取真实代码。
+Ask 模式优先检索这些结构化索引。索引不足或问题涉及具体实现时，仍然通过运行时 Tool Registry 和 Tool Executor 调用只读工具读取真实代码。
 
 ## 项目级 Skill 路由
 
@@ -58,7 +58,7 @@ Ask 阶段使用 `SkillRegistry.route_query_skills(...)`。它只从 `ProjectMem
 - Code Knowledge Index 中的 API、route、frontend call、mapper、data model 等条目。
 - Session Memory 的关注模块、文件、API 和流程。
 
-被选中的 routed skills 才会贡献 query hints、tool plan hints 和 answer prompts。
+被选中的 routed skills 才会贡献 query hints、tool plan hints 和 answer prompts。Skill 不直接调用 `read_file`、`search_keyword` 等底层函数，也不能把 prompt 当作事实依据。
 
 ## 当前支持的 Skill
 

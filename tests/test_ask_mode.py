@@ -5,10 +5,16 @@ from pathlib import Path
 
 from code_reader_agent.memory.project_memory import build_project_memory
 from code_reader_agent.models import ProjectMemory, ProjectMemoryOverview, SessionMemory, SessionMemoryTurn
+from code_reader_agent.runtime.llm_client import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL_ENV
 from code_reader_agent.repo_map.builder import build_repo_map
 from code_reader_agent.runtime.ask_mode import classify_ask_intent, run_ask_mode
 from code_reader_agent.scanner import scan_project
 from tests.test_scanner import write_minimal_java_project, write_minimal_vue_project
+
+
+def disable_llm_env(monkeypatch: object) -> None:
+    monkeypatch.delenv(DEFAULT_API_KEY_ENV, raising=False)
+    monkeypatch.delenv(DEFAULT_BASE_URL_ENV, raising=False)
 
 
 def test_classify_ask_intent_covers_supported_question_types() -> None:
@@ -60,6 +66,7 @@ def test_project_memory_builds_api_index_from_java_and_frontend_calls(tmp_path: 
 
 
 def test_ask_mode_overview_uses_project_memory_without_tools(tmp_path: Path, monkeypatch: object) -> None:
+    disable_llm_env(monkeypatch)
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
     write_minimal_vue_project(tmp_path)
 
@@ -68,6 +75,8 @@ def test_ask_mode_overview_uses_project_memory_without_tools(tmp_path: Path, mon
     assert result.intent == "project_overview"
     assert result.answer
     assert result.tool_calls == []
+    assert result.used_llm is False
+    assert result.fallback_used is True
     assert result.resolved_query
     assert result.context_pack
     assert result.context_pack.project_context
@@ -75,6 +84,7 @@ def test_ask_mode_overview_uses_project_memory_without_tools(tmp_path: Path, mon
 
 
 def test_ask_mode_file_question_reads_real_file_and_records_reason(tmp_path: Path, monkeypatch: object) -> None:
+    disable_llm_env(monkeypatch)
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
     write_minimal_java_project(tmp_path)
 
@@ -83,12 +93,15 @@ def test_ask_mode_file_question_reads_real_file_and_records_reason(tmp_path: Pat
     assert result.intent == "file_explanation"
     assert "src/main/java/com/example/demo/UserController.java" in result.related_files
     assert any(call.tool_name == "read_file" and call.reason for call in result.tool_calls)
+    assert any(call.tool_name == "read_file" and call.timestamp and call.duration_ms is not None for call in result.tool_calls)
+    assert any(call.tool_name == "read_file" and call.input.get("relative_path") for call in result.tool_calls)
     assert any(ref.path.endswith("UserController.java") for ref in result.references)
     assert result.tool_plan and result.tool_plan.need_tools is True
     assert result.context_pack and result.context_pack.code_evidence
 
 
 def test_ask_mode_followup_uses_session_memory_for_api_question(tmp_path: Path, monkeypatch: object) -> None:
+    disable_llm_env(monkeypatch)
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
     write_minimal_vue_project(tmp_path)
     (tmp_path / "src" / "api").mkdir(parents=True)
@@ -107,6 +120,7 @@ def test_ask_mode_followup_uses_session_memory_for_api_question(tmp_path: Path, 
 
 
 def test_ask_mode_api_result_is_json_serializable(tmp_path: Path, monkeypatch: object) -> None:
+    disable_llm_env(monkeypatch)
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
     write_minimal_vue_project(tmp_path)
 
@@ -117,6 +131,7 @@ def test_ask_mode_api_result_is_json_serializable(tmp_path: Path, monkeypatch: o
 
 
 def test_ask_mode_accepts_legacy_session_intent_for_followup(tmp_path: Path, monkeypatch: object) -> None:
+    disable_llm_env(monkeypatch)
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
     write_minimal_vue_project(tmp_path)
     legacy = SessionMemory(
@@ -141,6 +156,7 @@ def test_ask_mode_accepts_legacy_session_intent_for_followup(tmp_path: Path, mon
 
 
 def test_context_pack_budget_trims_large_evidence(tmp_path: Path, monkeypatch: object) -> None:
+    disable_llm_env(monkeypatch)
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
     write_minimal_java_project(tmp_path)
     controller = tmp_path / "src" / "main" / "java" / "com" / "example" / "demo" / "UserController.java"
@@ -151,3 +167,37 @@ def test_context_pack_budget_trims_large_evidence(tmp_path: Path, monkeypatch: o
     assert result.context_pack
     assert len(result.context_pack.context_text) <= 12_000
     assert result.context_pack.code_evidence
+
+
+def test_ask_mode_uses_llm_answer_when_configured(tmp_path: Path, monkeypatch: object) -> None:
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    write_minimal_vue_project(tmp_path)
+
+    class FakeConfig:
+        model = "glm-test"
+
+    class FakeClient:
+        config = FakeConfig()
+
+        def __init__(self, model: str) -> None:
+            self.model = model
+
+        def is_configured(self) -> bool:
+            return True
+
+        def missing_environment_variables(self) -> list[str]:
+            return []
+
+        def complete(self, messages: list[dict[str, object]], tools: list[dict[str, object]]) -> dict[str, object]:
+            assert tools == []
+            assert "Context Pack" in str(messages[-1]["content"])
+            return {"choices": [{"message": {"content": "这是来自真实 LLM 路径的 Ask 回答。"}}]}
+
+    monkeypatch.setattr("code_reader_agent.runtime.ask_mode.LiteLLMClient", FakeClient)
+
+    result = run_ask_mode(str(tmp_path), "这个项目是做什么的？")
+
+    assert result.used_llm is True
+    assert result.fallback_used is False
+    assert result.llm_model == "glm-test"
+    assert result.answer == "这是来自真实 LLM 路径的 Ask 回答。"

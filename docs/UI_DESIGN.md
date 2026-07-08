@@ -16,10 +16,11 @@ MVP 的右侧 Agent 区域不是普通聊天框，而是“分析目标 / Agent 
 - 中间：Codebase Map
 - 右侧：Agent Panel
 
-工具和 Skill 管理入口位于左侧底部，以内置弹窗打开，不切换主页面：
+工具、Skill 和模型设置入口位于左侧底部，以内置弹窗打开，不切换主页面：
 
 - 工具管理
 - Skill 管理
+- 模型设置
 
 ## 左侧：Project Sessions Sidebar
 
@@ -28,7 +29,7 @@ MVP 的右侧 Agent 区域不是普通聊天框，而是“分析目标 / Agent 
 - GitHub 仓库链接输入入口，用于新建项目分析会话。
 - 历史项目列表，每个项目像一条 ChatGPT 会话。
 - 项目名、GitHub repository、当前状态和最后更新时间。
-- 左下角固定工具管理和 Skill 管理入口。
+- 左下角固定工具管理、Skill 管理和模型设置入口。
 - 当前项目会话选中态。
 
 交互：
@@ -42,6 +43,7 @@ MVP 的右侧 Agent 区域不是普通聊天框，而是“分析目标 / Agent 
 - 删除历史项目只移除侧边栏会话记录，不删除 `.codereader/repos` 下的仓库缓存。
 - 左侧边栏固定宽度和视口高度，历史项目列表在边栏内部滚动。
 - 根据扫描状态显示 loading、empty、error、success 状态。
+- 模型设置弹窗只配置百炼模型名称，显示 `litellm` / `langgraph` 状态和百炼环境变量配置状态，并提供连通性测试。
 
 ## 项目工作台
 

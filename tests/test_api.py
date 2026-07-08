@@ -441,6 +441,37 @@ def test_agent_ask_api_returns_intent_answer_and_session_memory(tmp_path: Path, 
     assert payload["tool_calls"][0]["reason"]
     assert payload["session_memory"]["turns"][-1]["intent"] == "tech_stack"
     assert payload["trace_events"]
+    assert payload["used_llm"] is False
+    assert payload["fallback_used"] is True
+    assert payload["llm_model"] == "glm-5.1"
+
+
+def test_model_settings_api_updates_model_and_reports_missing_env(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+
+    initial = client.get("/api/model-settings")
+
+    assert initial.status_code == 200
+    assert initial.json()["model"] == "glm-5.1"
+    assert initial.json()["api_key_configured"] is False
+    assert initial.json()["base_url_configured"] is False
+    assert isinstance(initial.json()["litellm_installed"], bool)
+    assert isinstance(initial.json()["langgraph_installed"], bool)
+
+    updated = client.post("/api/model-settings", json={"model": "qwen-plus"})
+
+    assert updated.status_code == 200
+    assert updated.json()["model"] == "qwen-plus"
+
+    test_response = client.post("/api/model-settings/test", json={})
+
+    assert test_response.status_code == 200
+    payload = test_response.json()
+    assert payload["ok"] is False
+    assert payload["model"] == "qwen-plus"
+    assert set(payload["missing_environment"]) == {"DASHSCOPE_API_KEY", "DASHSCOPE_BASE_URL"}
 
 
 def test_agent_run_api_returns_llm_result_with_mock(tmp_path: Path, monkeypatch: Any) -> None:

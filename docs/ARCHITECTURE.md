@@ -141,8 +141,16 @@ Ask 模式入口：
 - `POST /api/agent/ask` 是报告生成后的右侧追问入口。
 - 输入 `project_path`、`question` 和可选 `session_memory`。
 - 返回 `resolved_query`、`intent_result`、`tool_plan`、`context_pack`、`code_evidence`、`intent`、`answer`、`related_files`、`implementation_path`、`key_code_notes`、`references`、`tool_calls`、`trace_events` 和 `session_memory`。
+- 返回还包含 `used_llm`、`fallback_used` 和 `llm_model`，用于区分真实百炼回答和确定性降级回答。
 - 当前支持 8 类意图：项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈和符号定位。
 - Ask 模式只允许只读工具，不写被分析仓库，不运行项目命令，不执行 Git 操作。
+
+模型设置入口：
+
+- `GET /api/model-settings` 返回当前百炼模型名、`litellm` / `langgraph` 安装状态，以及 `DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL` 是否配置。
+- `POST /api/model-settings` 只保存模型名称，不保存 API Key、Base URL 或其他密钥。
+- `POST /api/model-settings/test` 发起最小百炼连通性测试，返回脱敏结果。
+- 当前只支持百炼平台 OpenAI-compatible 调用。
 
 Legacy Phase 4 单 Agent 解读：
 
@@ -173,32 +181,46 @@ Ask runtime：
 - `code_reader_agent.runtime.ask_mode` 使用 LangGraph `StateGraph` 表达节点流程。
 - 节点顺序固定为 `QueryRewriter -> IntentClassifier -> ContextRetriever -> ToolPlanner -> EvidenceCollector -> ContextBuilder -> AnswerComposer -> MemoryUpdater`。
 - 如果本地开发环境暂时无法安装 `langgraph`，runtime 会使用同顺序的最小 fallback 以便离线测试；生产依赖仍在 `pyproject.toml` 中声明为 `langgraph`。
-- Ask 第一版使用确定性模板组织回答，LLM 后续只能用于表达组织，不能绕过只读工具和 evidence 边界。
+- Ask 使用百炼 LLM 基于 `ContextPack` 组织最终回答；LLM 不能绕过只读工具和 evidence 边界。缺少模型配置或调用失败时，Answer Composer 会降级为确定性模板。
 
 ## Tool System 层
 
 职责：
 
 - 封装只读工具。
+- 通过运行时 Tool Registry 管理工具定义、权限、风险等级、可用模式、参数 schema、timeout 和 handler。
+- 通过 Tool Executor 统一执行工具调用，校验 Ask 只读权限、参数和项目路径边界。
+- 通过 Tool Result Processor 将原始结果裁剪成 CodeEvidence。
+- 通过 Tool Trace Store 记录工具调用原因、耗时、时间戳和结果摘要。
 - 统一记录工具输入、输出、耗时、错误和证据。
 - 限制工具访问范围。
 - 对写文件、运行命令等高风险行为要求用户确认。
 
-第一版工具默认只读。
+第一版 Ask 工具默认只读。Ask 模式只允许 `permission=read`、`risk_level=safe` 且 `available_in_modes` 包含 `ask` 的工具；不写文件、不运行项目命令、不执行 Git 操作。
 
 Ask 模式新增只读工具：
 
 - `list_files`
+- `read_file`
+- `read_file_chunk`
+- `get_file_metadata`
+- `search_keyword`
 - `search_symbol`
+- `search_api_path`
+- `search_file_by_name`
 - `parse_dependencies`
+- `parse_package_scripts`
 - `parse_routes`
 - `parse_api_calls`
 - `parse_controller`
 - `parse_mapper`
-- `search_keyword`
-- `search_api_path`
+- `query_project_memory`
+- `query_code_index`
+- `query_api_index`
+- `query_flow_index`
+- `query_symbol_index`
 
-每次工具调用记录 `tool_name`、输入摘要、输出摘要、状态、错误和 `reason`，前端可展示为什么调用该工具。
+每次工具调用记录 `tool_name`、输入参数、输入摘要、输出摘要、状态、错误、`reason`、耗时和时间戳，前端可展示为什么调用该工具。
 
 ## Skill Registry 层
 
@@ -281,6 +303,7 @@ Phase 1 最小扫描结果不是完整 Repo Map，只提供后续 Builder 需要
 - `skills`：内置和自定义 skill 元数据，包含 `details` 结构化详情；自定义 skill 第一版只用于管理弹窗展示，不参与 Agent 路由。
 - `project_memories`：按稳定 `project_path` hash 保存 Project Memory 和 Code Knowledge Index，包含 Project Memory、Module Summary、File Summary、API Index、Symbol Index 和 Flow Index。
 - `session_memories`：按项目保存短期 Ask 会话记忆，包含当前话题、关注模块、关注文件/API/流程、上一轮问题和回答摘要，用于跨轮追问。
+- `model_settings`：保存当前百炼模型名。密钥和私有 endpoint 不进入 state，只从本机运行环境读取。
 
 读取旧 JSON 状态时，如果内置 tool/skill 缺少 `details`，Local State 会自动补齐默认详情，并保留用户已编辑的名称、说明、补充说明和启用状态。
 

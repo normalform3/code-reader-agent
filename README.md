@@ -29,7 +29,7 @@ CodeReader Agent 的目标是把这些理解过程变成两阶段工作流：第
 
 - 用户输入公开 GitHub 仓库链接后创建分析任务。
 - Planner 生成分析计划。
-- Tool Executor 按计划调用只读工具扫描项目、读取配置、搜索代码并构建 Repo Map。
+- Tool Executor 按计划通过运行时 Tool Registry 调用只读工具扫描项目、读取配置、搜索代码并构建 Repo Map。
 - Context Manager 管理项目上下文、任务上下文、符号上下文和当前记忆上下文。
 - Skill Registry 根据技术栈激活 `JavaWebSkill`、`SpringBootSkill`、`MyBatisSkill`、`VueSkill`、`RestApiSkill` 或通用理解 skill。
 - 识别技术栈、目录结构、包管理器、启动命令和入口文件。
@@ -84,7 +84,7 @@ CodeReader Agent 的目标是把这些理解过程变成两阶段工作流：第
 - 报告生成后提供右侧 Ask 边栏：
   - 支持项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈和符号定位问题意图。
   - 优先检索 Project Memory、Module Summary、File Summary、API Index、Symbol Index、Flow Index 和 Session Memory。
-  - 上下文不足时调用只读工具读取文件、搜索关键词、解析依赖、路由、API 调用、Controller 和 Mapper 候选。
+  - 上下文不足时通过 Tool Planner、Tool Executor 和运行时 Tool Registry 调用只读工具读取文件、搜索关键词、解析依赖、路由、API 调用、Controller 和 Mapper 候选。
   - 构造小而准确的 Context Pack，避免每次把全量代码库塞给模型。
   - 回答包含相关文件、候选实现路径、关键代码说明和参考依据。
 
@@ -111,7 +111,7 @@ CodeReader Agent 的目标是把这些理解过程变成两阶段工作流：第
 - Skill Registry：Skill 不是单纯提示词，而是“技术栈名称 + 激活条件 + 扫描函数 + 解析规则 + 索引构建逻辑 + 检索提示 + 回答提示词”的代码理解插件；当前可根据项目技术栈激活 Java Web、Spring Boot、MyBatis、Vue 和 REST API Skill。
 - Skill Router：在现有 Skill Registry 上提供两层轻量路由。项目扫描阶段只激活真实命中的技术栈 Skill，并且只有 ActiveSkill 参与 scan/buildIndex；Ask 阶段再根据问题意图、关键词、Code Knowledge Index 命中和 Session Memory 选择本轮 routed skills。
 - Planner / Context / Report / Trace：让用户看到分析计划、上下文选择、最终报告和执行轨迹。
-- Read-only Tools：第一版工具默认只读，任何写文件或运行命令的能力都需要用户确认。
+- Runtime Tool System：Ask 模式通过独立 Tool Registry、Tool Executor、Result Processor 和 Tool Trace Store 获取代码证据。当前只注册 `permission=read`、`risk_level=safe`、`available_in_modes` 包含 `ask` 的工具，不修改用户代码、不运行项目命令、不执行 Git 操作。
 - Agent Panel：展示分析目标、Planner 计划、Skill Registry、Context Snapshot、Report、Agent Steps 和 Trace Logger。
 - Codebase Map：展示模块树、文件树和后续的模块关系图。
 

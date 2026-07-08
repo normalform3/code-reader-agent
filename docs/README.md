@@ -7,6 +7,7 @@
 - `REPO_MAP_SCHEMA.md`：Repo Map 数据结构。
 - `SKILLS.md`：技能机制和第一批 skills。
 - `TOOLS.md`：工具系统和安全边界。
+- `tool-system.md`：运行时 Tool Registry、Executor、Result Processor 和 Trace 设计。
 - `CONTEXT_MANAGER.md`：上下文管理策略。
 - `ASK_MODE.md`：报告后的 Ask 模式流程、上下文层和输出契约。
 - `design.md`：轻量级两层 Skill Router 设计。

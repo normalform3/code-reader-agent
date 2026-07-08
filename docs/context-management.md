@@ -25,15 +25,17 @@ Query Rewriter 处理指代
 -> SkillRouter 选择本轮 routed skills
 -> Context Retriever 检索 Project Memory / Code Knowledge Index / Session Memory
 -> Tool Planner 合并 routed skill hints
--> Evidence Collector 执行只读工具
+-> Tool Executor 执行注册过的只读工具
+-> Tool Result Processor 生成 CodeEvidence
 -> Context Builder 构造 Context Pack
 ```
 
 ## Context Pack 原则
 
 - 只放入回答当前问题需要的模块、文件、API、流程和证据。
-- 具体实现问题必须有只读工具 evidence。
+- 具体实现问题必须有通过 Tool Executor 获取的只读工具 evidence。
 - 长文件片段需要裁剪。
+- 完整文件内容不能直接进入 Context Pack；`read_file` 和 `read_file_chunk` 结果需要先裁剪为 `CodeEvidence.code_snippet`。
 - Skill answer prompt 只影响表达结构，不提供事实。
 - 回答必须尽量引用文件路径、调用链候选和证据来源。
 

@@ -39,6 +39,19 @@ def test_model_config_builds_litellm_kwargs_from_environment(monkeypatch: pytest
     assert kwargs["model"] == "openai/glm-5.1"
     assert kwargs["api_key"] == "test-key"
     assert kwargs["api_base"] == "https://dashscope.example/openai-compatible/v1"
+    assert "tool_choice" not in kwargs
+
+
+def test_model_config_includes_tool_choice_when_tools_are_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(DEFAULT_API_KEY_ENV, "test-key")
+    monkeypatch.setenv(DEFAULT_BASE_URL_ENV, "https://dashscope.example/openai-compatible/v1")
+
+    kwargs = ModelProviderConfig.bailian_glm().completion_kwargs(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "scan_project", "parameters": {}}}],
+    )
+
+    assert kwargs["tools"]
     assert kwargs["tool_choice"] == "auto"
 
 

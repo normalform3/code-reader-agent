@@ -104,15 +104,24 @@ class SpringBootSkill:
                     tool_name="parse_controller",
                     args={},
                     purpose="Spring Boot Skill 需要提取 Controller 接口候选作为真实代码证据。",
+                    priority=82,
                 )
             )
         if any(word in text for word in ("登录", "login", "认证", "auth", "token", "权限")):
+            priorities = {
+                "AuthController": 79,
+                "SecurityConfig": 78,
+                "SecurityFilterChain": 76,
+                "Jwt": 74,
+                "UserDetailsService": 72,
+            }
             for keyword in ("AuthController", "SecurityConfig", "SecurityFilterChain", "Jwt", "UserDetailsService"):
                 plans.append(
                     PlannedToolCall(
                         tool_name="search_keyword",
                         args={"keyword": keyword},
                         purpose=f"Spring Boot Skill 判断认证链路可能关联 {keyword}。",
+                        priority=priorities[keyword],
                     )
                 )
         return plans

@@ -165,6 +165,7 @@ def test_ask_mode_uses_skill_hints_and_read_only_tool_plans(tmp_path: Path, monk
     assert all(call.tool_name in {"search_keyword", "parse_controller", "parse_api_calls", "parse_routes", "parse_mapper", "read_file"} for call in result.tool_plan.tool_calls)
     assert all(call.purpose for call in result.tool_plan.tool_calls)
     assert any(call.tool_name == "search_keyword" and call.args.get("keyword") == "AuthController" for call in result.tool_plan.tool_calls)
+    assert result.tool_calls and all(call.reason and call.timestamp and call.duration_ms is not None for call in result.tool_calls)
     assert result.code_evidence
 
 

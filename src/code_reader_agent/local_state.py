@@ -12,6 +12,8 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from code_reader_agent.models import (
+    ModelSettings,
+    ModelSettingsUpdate,
     ProjectMemory,
     ProjectSession,
     ProjectSessionCreate,
@@ -23,6 +25,9 @@ from code_reader_agent.models import (
     RegistryTool,
     SessionMemory,
 )
+
+
+DEFAULT_MODEL_SETTINGS = ModelSettings()
 
 
 DEFAULT_TOOL_DEFINITIONS = [
@@ -573,6 +578,31 @@ def save_session_memory(memory: SessionMemory) -> SessionMemory:
     return updated
 
 
+def get_model_settings() -> ModelSettings:
+    """Load local Bailian model settings."""
+
+    state = _read_state()
+    raw_settings = state.get("model_settings", DEFAULT_MODEL_SETTINGS.model_dump())
+    try:
+        return ModelSettings.model_validate(raw_settings)
+    except ValidationError as exc:
+        raise LocalStateError("Local model settings state is invalid.") from exc
+
+
+def update_model_settings(payload: ModelSettingsUpdate) -> ModelSettings:
+    """Persist local Bailian model settings without storing secrets."""
+
+    model = payload.model.strip()
+    if not model:
+        raise LocalStateError("Model name must not be empty.")
+    current = get_model_settings()
+    updated = current.model_copy(update={"provider": "bailian", "model": model, "updated_at": _now()})
+    state = _read_state()
+    state["model_settings"] = updated.model_dump()
+    _write_state(state)
+    return updated
+
+
 def list_tools() -> list[RegistryTool]:
     """Return tool registry items with built-ins merged in."""
 
@@ -684,6 +714,7 @@ def _read_state() -> dict[str, object]:
         "skills": raw.get("skills", []),
         "project_memories": raw.get("project_memories", {}),
         "session_memories": raw.get("session_memories", {}),
+        "model_settings": raw.get("model_settings", DEFAULT_MODEL_SETTINGS.model_dump()),
     }
 
 
@@ -706,6 +737,7 @@ def _initial_state() -> dict[str, object]:
         "skills": [_builtin_registry_item(item, RegistrySkill, now).model_dump() for item in DEFAULT_SKILL_DEFINITIONS],
         "project_memories": {},
         "session_memories": {},
+        "model_settings": DEFAULT_MODEL_SETTINGS.model_dump(),
     }
 
 

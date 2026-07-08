@@ -69,14 +69,16 @@ class ModelProviderConfig:
             missing = " or ".join(self.missing_environment_variables())
             raise LLMConfigurationError(f"Missing {missing}; cannot run LLM agent loop.")
 
-        return {
+        kwargs: dict[str, Any] = {
             "model": self.litellm_model,
             "api_key": api_key,
             "api_base": base_url,
             "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
         }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["tool_choice"] = "auto"
+        return kwargs
 
 
 class LiteLLMClient:

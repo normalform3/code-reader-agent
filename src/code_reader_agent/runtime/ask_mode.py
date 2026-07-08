@@ -42,6 +42,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised only when dependency
             return _CompiledGraph()
 
 from code_reader_agent.local_state import (
+    get_model_settings,
     get_project_memory,
     get_session_memory,
     project_id_for_path,
@@ -74,20 +75,10 @@ from code_reader_agent.models import (
 )
 from code_reader_agent.repo_map.builder import build_repo_map
 from code_reader_agent.scanner import scan_project
+from code_reader_agent.runtime.llm_client import LLMConfigurationError, LiteLLMClient
 from code_reader_agent.skills.registry import KNOWLEDGE_INDEX_VERSION, default_skill_registry
-from code_reader_agent.tools.read_only import (
-    ReadOnlyToolError,
-    list_files,
-    parse_api_calls,
-    parse_controller,
-    parse_dependencies,
-    parse_mapper,
-    parse_routes,
-    read_file,
-    search_api_path,
-    search_keyword,
-    search_symbol,
-)
+from code_reader_agent.tools.executor import ToolExecutor
+from code_reader_agent.tools.models import ToolExecutionContext
 
 
 CONTEXT_PACK_CHAR_BUDGET = 12_000
@@ -144,6 +135,9 @@ class AskState(TypedDict):
     skill_answer_prompts: NotRequired[list[str]]
     key_code_notes: NotRequired[list[str]]
     answer: NotRequired[str]
+    used_llm: NotRequired[bool]
+    fallback_used: NotRequired[bool]
+    llm_model: NotRequired[str]
     warnings: NotRequired[list[str]]
     trace_events: NotRequired[list[TraceEvent]]
 
@@ -209,6 +203,9 @@ def run_ask_mode(
         trace_events=state.get("trace_events", []),
         session_memory=state.get("session_memory", active_session_memory),
         warnings=_dedupe_strings(state.get("warnings", [])),
+        used_llm=state.get("used_llm", False),
+        fallback_used=state.get("fallback_used", False),
+        llm_model=state.get("llm_model"),
     )
 
 
@@ -461,52 +458,51 @@ def _tool_planner(state: AskState) -> AskState:
     related_apis = state.get("related_apis", [])
     planned: list[PlannedToolCall] = []
 
-    def add(tool_name: str, args: dict[str, object], purpose: str) -> None:
-        if len(planned) >= MAX_TOOL_CALLS:
-            return
+    def add(tool_name: str, args: dict[str, object], purpose: str, priority: int = 0) -> None:
         key = (tool_name, tuple(sorted(args.items())))
         if any((item.tool_name, tuple(sorted(item.args.items()))) == key for item in planned):
             return
-        planned.append(PlannedToolCall(tool_name=tool_name, args=args, purpose=purpose))
+        planned.append(PlannedToolCall(tool_name=tool_name, args=args, purpose=purpose, priority=priority))
 
     for skill_plan in default_skill_registry().collect_tool_plans(resolved, state.get("retrieved_context", []), state.get("routed_skills", [])):
-        add(skill_plan.tool_name, skill_plan.args, skill_plan.purpose)
+        add(skill_plan.tool_name, skill_plan.args, skill_plan.purpose, skill_plan.priority or 78)
 
     if intent_result.intent == "project_overview":
         if not state.get("retrieved_context"):
-            add("list_files", {"max_depth": 2}, "项目记忆不足，补充目录结构。")
+            add("list_files", {"max_depth": 2}, "项目记忆不足，补充目录结构。", 40)
     elif intent_result.intent == "tech_stack":
-        add("parse_dependencies", {}, "确认依赖文件和技术栈证据。")
+        add("parse_dependencies", {}, "确认依赖文件和技术栈证据。", 70)
     elif intent_result.intent == "config_lookup":
-        add("parse_dependencies", {}, "读取配置和依赖摘要。")
+        add("parse_dependencies", {}, "读取配置和依赖摘要。", 80)
         for path in related_files[:4]:
-            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 80}, "配置类问题需要读取真实配置片段。")
+            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 80}, "配置类问题需要读取真实配置片段。", 70)
     elif intent_result.intent == "file_explanation":
         for path in related_files[:4]:
-            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 140}, "用户询问指定文件，需要读取真实代码片段。")
+            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 140}, "用户询问指定文件，需要读取真实代码片段。", 90)
         if not related_files:
-            add("search_symbol", {"symbol": _search_query(question)}, "文件记忆无法定位，按符号继续搜索。")
+            add("search_symbol", {"symbol": _search_query(question)}, "文件记忆无法定位，按符号继续搜索。", 70)
     elif intent_result.intent == "module_explanation":
         for path in related_files[:4]:
-            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 120}, "模块解释涉及实现细节，读取关键文件补充证据。")
-        add("search_keyword", {"keyword": _search_query(question)}, "搜索模块相关关键词补足上下文。")
+            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 120}, "模块解释涉及实现细节，读取关键文件补充证据。", 80)
+        add("search_keyword", {"keyword": _search_query(question)}, "搜索模块相关关键词补足上下文。", 70)
     elif intent_result.intent == "api_lookup":
-        add("parse_api_calls", {}, "提取前端 axios/fetch/request 调用候选。")
-        add("parse_controller", {}, "提取 Spring Controller 接口候选。")
+        add("parse_api_calls", {}, "提取前端 axios/fetch/request 调用候选。", 85)
+        add("parse_controller", {}, "提取 Spring Controller 接口候选。", 85)
         for api in related_apis[:3]:
-            add("search_api_path", {"api_path": api}, "接口定位需要搜索真实代码中的接口路径。")
+            add("search_api_path", {"api_path": api}, "接口定位需要搜索真实代码中的接口路径。", 80)
     elif intent_result.intent == "flow_trace":
         for path in related_files[:5]:
-            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 120}, "流程追踪需要读取关键文件作为链路依据。")
-        add("search_keyword", {"keyword": _search_query(question)}, "搜索流程关键词补充链路候选。")
+            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 120}, "流程追踪需要读取关键文件作为链路依据。", 80)
+        add("search_keyword", {"keyword": _search_query(question)}, "搜索流程关键词补充链路候选。", 75)
     elif intent_result.intent == "symbol_lookup":
         symbol = intent_result.possible_symbols[0] if intent_result.possible_symbols else _search_query(question)
-        add("search_symbol", {"symbol": symbol}, "符号定位需要搜索真实源码。")
+        add("search_symbol", {"symbol": symbol}, "符号定位需要搜索真实源码。", 85)
         for path in related_files[:3]:
-            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 120}, "读取符号所在文件片段。")
+            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 120}, "读取符号所在文件片段。", 75)
     elif intent_result.need_code_evidence:
-        add("search_keyword", {"keyword": _search_query(question)}, "问题涉及具体实现，需要搜索真实代码。")
+        add("search_keyword", {"keyword": _search_query(question)}, "问题涉及具体实现，需要搜索真实代码。", 70)
 
+    planned = sorted(planned, key=lambda item: item.priority, reverse=True)[:MAX_TOOL_CALLS]
     reason = "问题涉及具体实现或命中 Skill 建议，需要只读工具补充代码证据。" if planned else "项目记忆和索引足以回答该问题。"
     plan = ToolPlan(need_tools=bool(planned), reason=reason, tool_calls=planned)
     return {
@@ -524,16 +520,24 @@ def _evidence_collector(state: AskState) -> AskState:
     warnings = list(state.get("warnings", []))
     code_evidence = list(state.get("code_evidence", []))
     notes = list(state.get("key_code_notes", []))
+    executor = ToolExecutor()
+    execution_context = ToolExecutionContext(
+        project_path=state["project_path"],
+        mode="ask",
+        allowed_permissions=["read"],
+        project_memory=state["project_memory"],
+    )
 
     for planned in state.get("tool_plan", ToolPlan(need_tools=False, reason="")).tool_calls:
-        result = _execute_ask_tool(state["project_path"], planned)
-        tool_calls.append(result["tool_call"])
-        references.extend(result.get("references", []))
-        related_files.extend(result.get("related_files", []))
-        implementation_path.extend(result.get("implementation_path", []))
-        warnings.extend(result.get("warnings", []))
-        code_evidence.extend(result.get("code_evidence", []))
-        notes.extend(result.get("notes", []))
+        result = executor.execute(planned, execution_context)
+        if result.tool_call:
+            tool_calls.append(result.tool_call)
+        references.extend(result.references)
+        related_files.extend(result.related_files)
+        implementation_path.extend(result.implementation_path)
+        warnings.extend(result.warnings)
+        code_evidence.extend(result.evidence)
+        notes.extend(result.notes)
 
     return {
         **state,
@@ -588,8 +592,12 @@ def _context_builder(state: AskState) -> AskState:
 
 def _answer_composer(state: AskState) -> AskState:
     pack = state["context_pack"]
-    answer = _compose_answer(state["intent"], pack, state["project_memory"])
+    fallback_answer = _compose_answer(state["intent"], pack, state["project_memory"])
+    answer, used_llm, llm_model, warning = _compose_answer_with_llm(state["intent"], pack, fallback_answer)
     notes = list(state.get("key_code_notes", []))
+    warnings = list(state.get("warnings", []))
+    if warning:
+        warnings.append(warning)
     if pack.code_evidence:
         notes.extend(_notes_from_code_evidence(pack.code_evidence))
     else:
@@ -597,9 +605,80 @@ def _answer_composer(state: AskState) -> AskState:
     return {
         **state,
         "answer": answer,
+        "used_llm": used_llm,
+        "fallback_used": not used_llm,
+        "llm_model": llm_model,
+        "warnings": _dedupe_strings(warnings),
         "key_code_notes": _dedupe_strings(notes),
-        "trace_events": _append_trace(state, "Answer Composer", "证据化回答", "Composed answer with files, path, and evidence."),
+        "trace_events": _append_trace(
+            state,
+            "Answer Composer",
+            "LLM 证据化回答" if used_llm else "模板降级回答",
+            "Composed answer with Bailian LLM and Context Pack." if used_llm else "Composed deterministic fallback answer because LLM was unavailable.",
+        ),
     }
+
+
+def _compose_answer_with_llm(intent: AskIntent, pack: ContextPack, fallback_answer: str) -> tuple[str, bool, str | None, str | None]:
+    settings = get_model_settings()
+    client = LiteLLMClient(model=settings.model)
+    llm_model = client.config.model
+    if not client.is_configured():
+        missing = " or ".join(client.missing_environment_variables())
+        return fallback_answer, False, llm_model, f"Missing {missing}; Ask answer used deterministic fallback."
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are CodeReader Agent Ask mode. Answer in Chinese. "
+                "Use only the provided Context Pack and evidence. "
+                "Do not claim precise full call chains unless the evidence supports it. "
+                "When evidence is weak, say so clearly. "
+                "Return plain text, not JSON."
+            ),
+        },
+        {
+            "role": "user",
+            "content": "\n".join(
+                [
+                    f"Intent: {intent}",
+                    "Context Pack:",
+                    pack.context_text,
+                    "Answer requirements:",
+                    pack.answer_instructions,
+                ]
+            ),
+        },
+    ]
+    try:
+        response = client.complete(messages, tools=[])
+    except LLMConfigurationError as exc:
+        return fallback_answer, False, llm_model, f"Ask LLM is not configured: {exc}"
+    except Exception as exc:
+        return fallback_answer, False, llm_model, f"Ask LLM call failed: {exc}"
+
+    content = _extract_llm_text(response).strip()
+    if not content:
+        return fallback_answer, False, llm_model, "Ask LLM returned an empty answer; deterministic fallback was used."
+    return content, True, llm_model, None
+
+
+def _extract_llm_text(response: Any) -> str:
+    if isinstance(response, dict):
+        choices = response.get("choices")
+        if isinstance(choices, list) and choices:
+            message = choices[0].get("message") if isinstance(choices[0], dict) else None
+            if isinstance(message, dict):
+                content = message.get("content")
+                return content if isinstance(content, str) else ""
+        return ""
+    choices = getattr(response, "choices", None)
+    if choices:
+        message = getattr(choices[0], "message", None)
+        content = getattr(message, "content", None)
+        return content if isinstance(content, str) else ""
+    return ""
 
 
 def _memory_updater(state: AskState) -> AskState:
@@ -637,162 +716,6 @@ def _memory_updater(state: AskState) -> AskState:
         **state,
         "session_memory": updated,
         "trace_events": _append_trace(state, "Memory Updater", "Session Memory", f"Stored {len(updated.turns)} Ask turns."),
-    }
-
-
-def _execute_ask_tool(project_path: str, planned: PlannedToolCall) -> dict[str, Any]:
-    tool_name = planned.tool_name
-    args = planned.args
-    reason = planned.purpose
-    try:
-        if tool_name == "list_files":
-            entries = list_files(project_path, max_depth=args.get("max_depth") if isinstance(args.get("max_depth"), int) else None)
-            return _tool_success(tool_name, "file tree", f"Listed {len(entries)} entries.", reason, notes=[f"文件树包含 {len(entries)} 个条目。"])
-        if tool_name == "read_file":
-            line_range = _line_range(args)
-            result = read_file(project_path, str(args.get("relative_path") or ""), line_range=line_range)
-            evidence = EvidenceRef(
-                path=result.path,
-                reason=reason,
-                source="read_file",
-                start_line=result.start_line,
-                end_line=result.end_line,
-                excerpt=_trim_snippet(result.content, 2_000),
-            )
-            code_evidence = CodeEvidence(
-                source="tool",
-                file_path=result.path,
-                content_summary=f"Read lines {result.start_line}-{result.end_line}.",
-                code_snippet=evidence.excerpt,
-                relevance_reason=reason,
-            )
-            return _tool_success(
-                tool_name,
-                result.path,
-                f"Read lines {result.start_line}-{result.end_line}.",
-                reason,
-                references=[evidence],
-                related_files=[result.path],
-                warnings=result.warnings,
-                code_evidence=[code_evidence],
-            )
-        if tool_name == "search_keyword":
-            keyword = str(args.get("keyword") or args.get("query") or "")
-            result = search_keyword(project_path, keyword, str(args.get("scope")) if args.get("scope") else None)
-            return _search_tool_success(tool_name, keyword, result.matches, result.warnings, reason)
-        if tool_name == "search_api_path":
-            api_path = str(args.get("api_path") or "")
-            result = search_api_path(project_path, api_path)
-            return _search_tool_success(tool_name, api_path, result.matches, result.warnings, reason, api=api_path)
-        if tool_name == "search_symbol":
-            symbol = str(args.get("symbol") or "")
-            result = search_symbol(project_path, symbol)
-            return _search_tool_success(tool_name, symbol, result.matches, result.warnings, reason, symbol=symbol)
-        if tool_name == "parse_dependencies":
-            result = parse_dependencies(project_path)
-            files = ["package.json", "pom.xml", "build.gradle", "build.gradle.kts", *[str(item) for item in result.get("java_config_files", [])]]
-            return _tool_success(tool_name, "dependency files", "Parsed dependency metadata.", reason, related_files=files, notes=[_dependency_note(result)])
-        if tool_name == "parse_routes":
-            routes = parse_routes(project_path)
-            files = [str(item.get("file") or "") for item in routes]
-            evidence = [
-                CodeEvidence(source="tool", file_path=str(item.get("file") or ""), content_summary=f"route={item.get('path')}", relevance_reason=reason)
-                for item in routes[:12]
-            ]
-            return _tool_success(tool_name, "router files", f"Found {len(routes)} route candidates.", reason, related_files=files, code_evidence=evidence)
-        if tool_name == "parse_api_calls":
-            calls = parse_api_calls(project_path)
-            files = [str(item.get("file") or "") for item in calls]
-            evidence = [
-                CodeEvidence(source="tool", file_path=str(item.get("file") or ""), api=str(item.get("path") or ""), content_summary=f"{item.get('method') or 'UNKNOWN'} {item.get('path')}", relevance_reason=reason)
-                for item in calls[:20]
-            ]
-            return _tool_success(tool_name, "frontend API files", f"Found {len(calls)} frontend API calls.", reason, related_files=files, implementation_path=files, code_evidence=evidence)
-        if tool_name == "parse_controller":
-            endpoints = parse_controller(project_path)
-            files = [str(item.get("backend_file") or "") for item in endpoints]
-            evidence = [
-                CodeEvidence(source="tool", file_path=str(item.get("backend_file") or ""), api=str(item.get("path") or ""), symbol=str(item.get("backend_method") or "") or None, content_summary=f"{item.get('method') or 'UNKNOWN'} {item.get('path')}", relevance_reason=reason)
-                for item in endpoints[:20]
-            ]
-            return _tool_success(tool_name, "Spring controllers", f"Found {len(endpoints)} controller endpoints.", reason, related_files=files, implementation_path=files, code_evidence=evidence)
-        if tool_name == "parse_mapper":
-            mappings = parse_mapper(project_path)
-            files = [str(item.get("path") or "") for item in mappings]
-            evidence = [
-                CodeEvidence(source="tool", file_path=str(item.get("path") or ""), content_summary=f"mapper={item.get('kind')}", relevance_reason=reason)
-                for item in mappings[:20]
-            ]
-            return _tool_success(tool_name, "Mapper/Repository files", f"Found {len(mappings)} mapping candidates.", reason, related_files=files, implementation_path=files, code_evidence=evidence)
-    except (ReadOnlyToolError, ValueError, OSError) as exc:
-        return _tool_error(tool_name, str(args), str(exc), reason)
-    return _tool_error(tool_name, str(args), f"Tool is not allowed: {tool_name}", reason)
-
-
-def _search_tool_success(
-    tool_name: str,
-    input_summary: str,
-    matches: list[Any],
-    warnings: list[str],
-    reason: str,
-    api: str | None = None,
-    symbol: str | None = None,
-) -> dict[str, Any]:
-    references = [
-        EvidenceRef(path=item.path, reason=reason, source=tool_name, start_line=item.line_number, end_line=item.line_number, excerpt=item.line)
-        for item in matches
-    ]
-    code_evidence = [
-        CodeEvidence(
-            source="tool",
-            file_path=item.path,
-            symbol=symbol,
-            api=api,
-            content_summary=f"Matched line {item.line_number}.",
-            code_snippet=item.line,
-            relevance_reason=reason,
-        )
-        for item in matches[:20]
-    ]
-    return _tool_success(
-        tool_name,
-        input_summary,
-        f"Found {len(matches)} matches.",
-        reason,
-        references=references,
-        related_files=[item.path for item in matches],
-        warnings=warnings,
-        code_evidence=code_evidence,
-    )
-
-
-def _tool_success(
-    tool_name: str,
-    input_summary: str,
-    output_summary: str,
-    reason: str,
-    references: list[EvidenceRef] | None = None,
-    related_files: list[str] | None = None,
-    implementation_path: list[str] | None = None,
-    warnings: list[str] | None = None,
-    notes: list[str] | None = None,
-    code_evidence: list[CodeEvidence] | None = None,
-) -> dict[str, Any]:
-    return {
-        "tool_call": ToolCallRecord(tool_name=tool_name, input_summary=input_summary, output_summary=output_summary, status="success", reason=reason),
-        "references": references or [],
-        "related_files": related_files or [],
-        "implementation_path": implementation_path or [],
-        "warnings": warnings or [],
-        "notes": notes or [],
-        "code_evidence": code_evidence or [],
-    }
-
-
-def _tool_error(tool_name: str, input_summary: str, error: str, reason: str) -> dict[str, Any]:
-    return {
-        "tool_call": ToolCallRecord(tool_name=tool_name, input_summary=input_summary, output_summary=error, status="error", error=error, reason=reason),
-        "warnings": [error],
     }
 
 
@@ -1089,25 +1012,11 @@ def _api_context(entry: ApiIndexEntry) -> str:
     return " ".join(parts)
 
 
-def _line_range(args: dict[str, object]) -> tuple[int, int] | None:
-    start = args.get("start_line")
-    end = args.get("end_line")
-    if isinstance(start, int) and isinstance(end, int):
-        return start, end
-    return None
-
-
 def _search_query(question: str) -> str:
     for token in _extract_keywords(question):
         if token not in {"用户", "正在", "延续", "一轮", "上下文"}:
             return token
     return "Controller"
-
-
-def _dependency_note(result: dict[str, object]) -> str:
-    frontend = result.get("frontend_dependencies")
-    java = result.get("java_dependencies")
-    return f"依赖摘要: frontend={len(frontend) if isinstance(frontend, dict) else 0}, java={len(java) if isinstance(java, dict) else 0}。"
 
 
 def _notes_from_code_evidence(evidence: list[CodeEvidence]) -> list[str]:

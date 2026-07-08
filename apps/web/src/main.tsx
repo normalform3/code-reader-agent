@@ -404,6 +404,30 @@ type AskModeResult = {
   trace_events: TraceEvent[];
   session_memory: SessionMemory;
   warnings: string[];
+  used_llm: boolean;
+  fallback_used: boolean;
+  llm_model: string | null;
+};
+
+type ModelSettingsStatus = {
+  provider: "bailian";
+  model: string;
+  api_key_env: string;
+  base_url_env: string;
+  api_key_configured: boolean;
+  base_url_configured: boolean;
+  litellm_installed: boolean;
+  langgraph_installed: boolean;
+  updated_at: string;
+};
+
+type ModelConnectionTestResult = {
+  ok: boolean;
+  provider: "bailian";
+  model: string;
+  message: string;
+  response_preview: string;
+  missing_environment: string[];
 };
 
 type GitHubImportResult = {
@@ -463,6 +487,7 @@ const DEFAULT_QUESTION = "请先为这个仓库生成项目说明书：这个项
 
 function App() {
   const [registryModal, setRegistryModal] = useState<RegistryKind | null>(null);
+  const [modelSettingsOpen, setModelSettingsOpen] = useState(false);
   const [sessions, setSessions] = useState<ProjectSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -659,7 +684,7 @@ function App() {
           id: `${Date.now()}-assistant`,
           role: "assistant",
           body: askResultText(result),
-          meta: `Ask · ${intentLabel(result.intent)}`,
+          meta: `Ask · ${intentLabel(result.intent)} · ${result.used_llm ? result.llm_model ?? "LLM" : "规则降级"}`,
         },
       ]);
       setStatus("ready");
@@ -694,6 +719,7 @@ function App() {
         githubUrl={githubUrl}
         onDeleteSession={handleDeleteSession}
         onGithubImport={handleGithubImport}
+        onOpenModelSettings={() => setModelSettingsOpen(true)}
         onOpenRegistry={setRegistryModal}
         onSelectSession={handleSelectSession}
         onSetGithubUrl={setGithubUrl}
@@ -722,6 +748,7 @@ function App() {
       />
 
       {registryModal ? <RegistryModal kind={registryModal} onClose={() => setRegistryModal(null)} /> : null}
+      {modelSettingsOpen ? <ModelSettingsModal onClose={() => setModelSettingsOpen(false)} /> : null}
     </main>
   );
 }
@@ -733,6 +760,7 @@ function Sidebar({
   githubUrl,
   onDeleteSession,
   onGithubImport,
+  onOpenModelSettings,
   onOpenRegistry,
   onSelectSession,
   onSetGithubUrl,
@@ -748,6 +776,7 @@ function Sidebar({
   githubUrl: string;
   onDeleteSession: (session: ProjectSession) => void;
   onGithubImport: (event: FormEvent<HTMLFormElement>) => void;
+  onOpenModelSettings: () => void;
   onOpenRegistry: (kind: RegistryKind) => void;
   onSelectSession: (session: ProjectSession) => void;
   onSetGithubUrl: (url: string) => void;
@@ -837,6 +866,9 @@ function Sidebar({
         </button>
         <button className="nav-button" type="button" onClick={() => onOpenRegistry("skills")}>
           Skill 管理
+        </button>
+        <button className="nav-button" type="button" onClick={onOpenModelSettings}>
+          模型设置
         </button>
       </nav>
     </aside>
@@ -1119,7 +1151,9 @@ function AgentPanel({
           <h3>CodeReader Copilot</h3>
         </div>
         <span className="ask-status">
-          {askResult ? `Ask · ${intentLabel(askResult.intent)}` : `${interpretation?.used_llm ? "LLM" : "规则"} · ${interpretation?.task_id ?? "待命"}`}
+          {askResult
+            ? `Ask · ${askResult.used_llm ? askResult.llm_model ?? "LLM" : "规则降级"}`
+            : `${interpretation?.used_llm ? "LLM" : "规则"} · ${interpretation?.task_id ?? "待命"}`}
         </span>
       </header>
 
@@ -1233,6 +1267,123 @@ function AgentPanel({
         </button>
       </div>
     </aside>
+  );
+}
+
+function ModelSettingsModal({ onClose }: { onClose: () => void }) {
+  const [settings, setSettings] = useState<ModelSettingsStatus | null>(null);
+  const [modelDraft, setModelDraft] = useState("glm-5.1");
+  const [status, setStatus] = useState<"loading" | "ready" | "saving" | "testing" | "error">("loading");
+  const [message, setMessage] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<ModelConnectionTestResult | null>(null);
+
+  useEffect(() => {
+    void loadSettings();
+  }, []);
+
+  async function loadSettings() {
+    setStatus("loading");
+    setMessage(null);
+    try {
+      const result = await getJson<ModelSettingsStatus>("/api/model-settings");
+      setSettings(result);
+      setModelDraft(result.model);
+      setStatus("ready");
+    } catch (caught) {
+      setStatus("error");
+      setMessage(caught instanceof Error ? caught.message : "读取模型设置失败。");
+    }
+  }
+
+  async function saveSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setStatus("saving");
+    setMessage(null);
+    setTestResult(null);
+    try {
+      const result = await postJson<ModelSettingsStatus>("/api/model-settings", { model: modelDraft.trim() });
+      setSettings(result);
+      setModelDraft(result.model);
+      setStatus("ready");
+      setMessage("模型设置已保存。");
+    } catch (caught) {
+      setStatus("error");
+      setMessage(caught instanceof Error ? caught.message : "保存模型设置失败。");
+    }
+  }
+
+  async function testConnection() {
+    setStatus("testing");
+    setMessage(null);
+    try {
+      const result = await postJson<ModelConnectionTestResult>("/api/model-settings/test", {});
+      setTestResult(result);
+      setStatus("ready");
+      setMessage(result.ok ? "百炼模型连通正常。" : result.message);
+    } catch (caught) {
+      setStatus("error");
+      setMessage(caught instanceof Error ? caught.message : "测试模型连通失败。");
+    }
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section aria-modal="true" className="settings-modal" role="dialog">
+        <header className="registry-modal-header">
+          <div>
+            <p className="kicker">Model Settings</p>
+            <h2>百炼模型设置</h2>
+            <span>当前只支持百炼 OpenAI-compatible 接口；密钥和 Base URL 从环境变量读取。</span>
+          </div>
+          <button className="secondary-button" type="button" onClick={onClose}>
+            关闭
+          </button>
+        </header>
+
+        <div className="settings-modal-body">
+          <form className="settings-form" onSubmit={saveSettings}>
+            <label htmlFor="model-name">模型名称</label>
+            <input id="model-name" value={modelDraft} onChange={(event) => setModelDraft(event.target.value)} placeholder="glm-5.1" />
+            <div className="settings-actions">
+              <button type="submit" disabled={status === "saving" || !modelDraft.trim()}>
+                {status === "saving" ? "保存中..." : "保存设置"}
+              </button>
+              <button className="secondary-button" type="button" onClick={testConnection} disabled={status === "testing" || status === "loading"}>
+                {status === "testing" ? "测试中..." : "测试连通"}
+              </button>
+            </div>
+          </form>
+
+          <div className="settings-grid">
+            <StatusTile label="Provider" value="百炼" ok />
+            <StatusTile label="LiteLLM" value={settings?.litellm_installed ? "已安装" : "未安装"} ok={Boolean(settings?.litellm_installed)} />
+            <StatusTile label="LangGraph" value={settings?.langgraph_installed ? "已安装" : "未安装，使用顺序 fallback"} ok={Boolean(settings?.langgraph_installed)} />
+            <StatusTile label={settings?.api_key_env ?? "DASHSCOPE_API_KEY"} value={settings?.api_key_configured ? "已配置" : "未配置"} ok={Boolean(settings?.api_key_configured)} />
+            <StatusTile label={settings?.base_url_env ?? "DASHSCOPE_BASE_URL"} value={settings?.base_url_configured ? "已配置" : "未配置"} ok={Boolean(settings?.base_url_configured)} />
+            <StatusTile label="当前模型" value={settings?.model ?? modelDraft} ok={Boolean(settings?.model ?? modelDraft)} />
+          </div>
+
+          {message ? <div className={status === "error" || testResult?.ok === false ? "error-box" : "success-box"}>{message}</div> : null}
+          {testResult ? (
+            <div className="settings-result">
+              <strong>{testResult.ok ? "连通成功" : "连通失败"}</strong>
+              <p>{testResult.message}</p>
+              {testResult.response_preview ? <code>{testResult.response_preview}</code> : null}
+              {testResult.missing_environment.length ? <span>缺少：{testResult.missing_environment.join(", ")}</span> : null}
+            </div>
+          ) : null}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function StatusTile({ label, value, ok }: { label: string; value: string; ok: boolean }) {
+  return (
+    <div className="status-tile" data-ok={ok}>
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -1763,6 +1914,7 @@ function intentLabel(intent: AskIntent) {
 
 function askResultText(result: AskModeResult) {
   const sections = [
+    `生成方式：${result.used_llm ? `百炼模型 ${result.llm_model ?? ""}`.trim() : "规则降级"}`,
     result.answer,
     result.related_files.length ? `相关文件：\n${result.related_files.slice(0, 8).map((path) => `- ${path}`).join("\n")}` : "",
     result.implementation_path.length ? `实现路径：\n${result.implementation_path.slice(0, 8).map((path) => `- ${path}`).join("\n")}` : "",

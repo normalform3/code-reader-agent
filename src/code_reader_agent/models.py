@@ -349,6 +349,9 @@ class ToolCallRecord(BaseModel):
     error: str | None = None
     reason: str | None = None
     evidence_ids: list[str] = Field(default_factory=list)
+    duration_ms: int | None = None
+    timestamp: str | None = None
+    input: dict[str, object] = Field(default_factory=dict)
 
 
 class ReadFileResult(BaseModel):
@@ -765,6 +768,7 @@ class PlannedToolCall(BaseModel):
     tool_name: str
     args: dict[str, object] = Field(default_factory=dict)
     purpose: str
+    priority: int = 0
 
 
 class ToolPlan(BaseModel):
@@ -835,6 +839,48 @@ class AskModeResult(BaseModel):
     trace_events: list[TraceEvent] = Field(default_factory=list)
     session_memory: SessionMemory = Field(default_factory=lambda: SessionMemory(project_id=""))
     warnings: list[str] = Field(default_factory=list)
+    used_llm: bool = False
+    fallback_used: bool = False
+    llm_model: str | None = None
+
+
+class ModelSettings(BaseModel):
+    """Local model settings for the Bailian provider."""
+
+    provider: Literal["bailian"] = "bailian"
+    model: str = "glm-5.1"
+    updated_at: str = ""
+
+
+class ModelSettingsUpdate(BaseModel):
+    """Update payload for local model settings."""
+
+    model: str
+
+
+class ModelSettingsStatus(BaseModel):
+    """User-facing model runtime status without exposing secrets."""
+
+    provider: Literal["bailian"] = "bailian"
+    model: str
+    api_key_env: str
+    base_url_env: str
+    api_key_configured: bool
+    base_url_configured: bool
+    litellm_installed: bool
+    langgraph_installed: bool
+    updated_at: str = ""
+
+
+class ModelConnectionTestResult(BaseModel):
+    """Result from a small Bailian connectivity check."""
+
+    ok: bool
+    provider: Literal["bailian"] = "bailian"
+    model: str
+    message: str
+    response_preview: str = ""
+    missing_environment: list[str] = Field(default_factory=list)
 
 
 class TraceEvent(BaseModel):

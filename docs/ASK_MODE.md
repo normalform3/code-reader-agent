@@ -1,6 +1,6 @@
 # Ask Mode
 
-Ask 模式发生在首次项目理解报告之后。它不重新全量读取代码库，也不直接把用户问题交给模型回答，而是围绕三层上下文构造小而准确的 `ContextPack`。
+Ask 模式发生在首次项目理解报告之后。它不重新全量读取代码库，也不直接把用户问题裸交给模型回答，而是围绕三层上下文构造小而准确的 `ContextPack`，再让百炼 LLM 基于证据组织最终回答。
 
 ## 三层上下文
 
@@ -17,9 +17,11 @@ QueryRewriter
 -> SkillRouter
 -> ContextRetriever
 -> ToolPlanner
--> EvidenceCollector
+-> ToolExecutor
+-> ToolResultProcessor
+-> ToolTraceStore
 -> ContextBuilder
--> AnswerComposer
+-> AnswerComposer (Bailian LLM with deterministic fallback)
 -> MemoryUpdater
 ```
 
@@ -41,9 +43,19 @@ QueryRewriter
 
 - 项目总览、技术栈、模块概览优先使用结构化记忆。
 - 只要问题涉及具体实现、具体文件、接口、方法、字段、权限判断或数据来源，就必须通过只读工具读取或搜索真实代码。
-- 只读工具包括 `read_file`、`search_keyword`、`search_api_path`、`search_symbol`、`parse_dependencies`、`parse_routes`、`parse_api_calls`、`parse_controller` 和 `parse_mapper`。
-- 工具结果不会全量塞进回答上下文，而是裁剪成 `CodeEvidence` 后进入 `ContextPack`。
+- 只读工具包括 `read_file`、`read_file_chunk`、`get_file_metadata`、`search_keyword`、`search_file_by_name`、`search_api_path`、`search_symbol`、`parse_dependencies`、`parse_package_scripts`、`parse_routes`、`parse_api_calls`、`parse_controller`、`parse_mapper` 和 `query_*_index`。
+- Ask 工具必须注册到运行时 Tool Registry，并通过 Tool Executor 执行。Ask 模式只允许 safe read 工具，不写文件、不运行任意 shell、不执行 Git 操作、不联网抓取代码。
+- 工具结果不会全量塞进回答上下文，而是经过 Tool Result Processor 裁剪成 `CodeEvidence` 后进入 `ContextPack`。
 - Skill prompt 只能影响回答组织方式，不能作为事实依据。
+- Answer Composer 会优先使用模型设置中的百炼模型生成自然语言回答；如果缺少 `DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL`、模型调用失败或返回空内容，则降级为确定性模板回答，并在 `warnings` 和 trace 中标记。
+
+## 模型设置
+
+- 当前只支持百炼平台的 OpenAI-compatible 接口。
+- 模型名称保存在本地 state 的 `model_settings.model`，默认是 `glm-5.1`。
+- API Key 和 Base URL 不写入本地 state，也不写入仓库；运行时只读取环境变量 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL`。
+- 前端左侧栏底部的“模型设置”可以查看 `litellm` / `langgraph` 是否安装、环境变量是否配置，并发起一次最小连通性测试。
+- 如果本机没有安装 `langgraph`，Ask runtime 使用同顺序 fallback graph；这不影响真实 LLM 调用，只影响工作流框架实现方式。
 
 ## Skill 参与方式
 
@@ -55,7 +67,7 @@ Skill 只做三件事：
 - `tool plan hints`：为 Tool Planner 增加只读工具建议，例如 `parse_controller()`、`parse_api_calls()`、`search_keyword("AuthController")`。
 - `answer prompts`：告诉 Answer Composer 按技术栈惯例组织说明，例如 Spring Boot 优先讲启动类、配置、接口路径、Controller 方法和相关 Service。
 
-最终回答仍必须来自 Project Memory、Code Knowledge Index 和 Evidence Collector 读取到的真实代码证据。
+最终回答仍必须来自 Project Memory、Code Knowledge Index 和 Tool Executor 读取到的真实代码证据。
 
 ## 输出契约
 
@@ -75,5 +87,8 @@ Skill 只做三件事：
 - `tool_calls`
 - `trace_events`
 - `session_memory`
+- `used_llm`
+- `fallback_used`
+- `llm_model`
 
 回答必须尽量包含相关文件路径、候选实现链路和证据说明；如果当前代码中没有明确证据，必须保守说明。

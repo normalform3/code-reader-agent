@@ -43,7 +43,9 @@ Ask 模式中的流程：
 -> routed skills 提供 query hints / tool hints / answer prompts
 -> Context Retriever 检索 Project Memory、Code Knowledge Index、Session Memory
 -> Tool Planner 结合索引命中和 Skill hints 规划只读工具
--> Evidence Collector 读取真实代码
+-> Tool Executor 通过运行时 Tool Registry 校验权限、参数、路径边界和超时
+-> Tool Result Processor 将原始工具结果裁剪为 CodeEvidence
+-> Tool Trace Store 记录工具名、参数、调用原因、耗时和结果摘要
 -> Context Builder 构造 Context Pack
 -> Answer Composer 生成证据化回答
 ```
@@ -58,7 +60,7 @@ Ask 模式中的流程：
 - 可测试：项目级 detect、scan、index merge 和 Ask routing 都可以用确定性测试覆盖。
 - 低噪声：避免所有 Skill 每轮 Ask 都贡献 hints 和工具建议。
 
-当前不做复杂多 Agent 路由，也不让 Skill 直接回答问题。Skill 只能影响检索、只读工具规划和回答组织；事实依据仍来自 ProjectMemory、Code Knowledge Index 和只读工具 evidence。
+当前不做复杂多 Agent 路由，也不让 Skill 直接回答问题或直接执行工具。Skill 只能影响检索、只读工具规划和回答组织；事实依据仍来自 ProjectMemory、Code Knowledge Index 和通过 Tool Executor 获取的只读工具 evidence。
 
 ## 当前 Skill
 
