@@ -295,6 +295,39 @@ class RegistrySkill(BaseModel):
     updated_at: str
 
 
+class ActiveSkillInfo(BaseModel):
+    """A detected skill with the reason it is active for this project."""
+
+    name: str
+    confidence: float = 0.0
+    reason: str = ""
+
+
+class RoutedSkillInfo(BaseModel):
+    """One active skill selected for the current Ask turn."""
+
+    name: str
+    confidence: float = 0.0
+    reason: str = ""
+    signals: list[str] = Field(default_factory=list)
+
+
+class SkillScanFile(BaseModel):
+    """One file selected by a technology skill scan."""
+
+    path: str
+    role: str
+    reason: str
+
+
+class QueryHint(BaseModel):
+    """A retrieval hint contributed by an active skill."""
+
+    keyword: str
+    reason: str
+    priority: int = 0
+
+
 class EvidenceRef(BaseModel):
     """A file-backed evidence pointer used by agent explanations."""
 
@@ -597,18 +630,82 @@ class SymbolIndexItem(BaseModel):
     summary: str | None = None
 
 
+class RouteIndexEntry(BaseModel):
+    """Frontend route candidate contributed by a skill."""
+
+    path: str
+    file: str
+    name: str | None = None
+    line_number: int | None = None
+    description: str | None = None
+
+
+class FrontendApiCallIndexEntry(BaseModel):
+    """Frontend API call candidate contributed by a skill."""
+
+    path: str
+    method: str | None = None
+    client: str | None = None
+    file: str
+    line_number: int | None = None
+    symbol: str | None = None
+
+
+class DataModelIndexEntry(BaseModel):
+    """Data model, entity, table, or SQL candidate contributed by a skill."""
+
+    name: str
+    kind: str
+    file: str
+    table: str | None = None
+    sql: str | None = None
+    summary: str | None = None
+
+
+class MapperRelationEntry(BaseModel):
+    """Mapper-to-entity or mapper-to-table relation candidate."""
+
+    mapper_file: str
+    entity_file: str | None = None
+    table: str | None = None
+    reason: str = ""
+
+
+class SkillScanResult(BaseModel):
+    """Structured output from one technology skill scan."""
+
+    skill_name: str
+    files: list[SkillScanFile] = Field(default_factory=list)
+    file_summaries: list[FileMemorySummary] = Field(default_factory=list)
+    module_summaries: list[ModuleMemorySummary] = Field(default_factory=list)
+    symbols: list[SymbolIndexItem] = Field(default_factory=list)
+    apis: list[ApiIndexEntry] = Field(default_factory=list)
+    flows: list[FlowIndexEntry] = Field(default_factory=list)
+    routes: list[RouteIndexEntry] = Field(default_factory=list)
+    frontend_api_calls: list[FrontendApiCallIndexEntry] = Field(default_factory=list)
+    data_models: list[DataModelIndexEntry] = Field(default_factory=list)
+    mapper_relations: list[MapperRelationEntry] = Field(default_factory=list)
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
 class ProjectMemory(BaseModel):
     """Structured memory generated from the first project understanding report."""
 
+    knowledge_index_version: str = ""
     project_id: str
     project_name: str
     project_path: str
     project_memory: ProjectMemoryOverview = Field(default_factory=ProjectMemoryOverview)
+    active_skills: list[ActiveSkillInfo] = Field(default_factory=list)
     module_summaries: list[ModuleMemorySummary] = Field(default_factory=list)
     file_summaries: list[FileMemorySummary] = Field(default_factory=list)
     api_index: list[ApiIndexEntry] = Field(default_factory=list)
     flow_index: list[FlowIndexEntry] = Field(default_factory=list)
     symbol_index: list[SymbolIndexItem] = Field(default_factory=list)
+    route_index: list[RouteIndexEntry] = Field(default_factory=list)
+    frontend_api_call_index: list[FrontendApiCallIndexEntry] = Field(default_factory=list)
+    data_model_index: list[DataModelIndexEntry] = Field(default_factory=list)
+    mapper_relations: list[MapperRelationEntry] = Field(default_factory=list)
     updated_at: str = ""
 
 
@@ -727,6 +824,8 @@ class AskModeResult(BaseModel):
     intent_result: IntentResult | None = None
     tool_plan: ToolPlan | None = None
     context_pack: ContextPack | None = None
+    routed_skills: list[RoutedSkillInfo] = Field(default_factory=list)
+    query_hints: list[QueryHint] = Field(default_factory=list)
     code_evidence: list[CodeEvidence] = Field(default_factory=list)
     related_files: list[str] = Field(default_factory=list)
     implementation_path: list[str] = Field(default_factory=list)
@@ -759,6 +858,7 @@ class AgentRunResult(BaseModel):
     analysis_goal: str = ""
     analysis_plan: list[AnalysisPlanItem] = Field(default_factory=list)
     selected_skills: list[str] = Field(default_factory=list)
+    active_skills: list[ActiveSkillInfo] = Field(default_factory=list)
     context_snapshot: ContextSnapshot = Field(default_factory=ContextSnapshot)
     project_manual: ProjectManual = Field(default_factory=ProjectManual)
     project_memory: ProjectMemory | None = None

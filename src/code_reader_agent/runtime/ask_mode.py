@@ -62,7 +62,9 @@ from code_reader_agent.models import (
     ModuleMemorySummary,
     PlannedToolCall,
     ProjectMemory,
+    QueryHint,
     ResolvedQuery,
+    RoutedSkillInfo,
     SessionMemory,
     SessionMemoryTurn,
     SymbolIndexItem,
@@ -72,6 +74,7 @@ from code_reader_agent.models import (
 )
 from code_reader_agent.repo_map.builder import build_repo_map
 from code_reader_agent.scanner import scan_project
+from code_reader_agent.skills.registry import KNOWLEDGE_INDEX_VERSION, default_skill_registry
 from code_reader_agent.tools.read_only import (
     ReadOnlyToolError,
     list_files,
@@ -127,6 +130,8 @@ class AskState(TypedDict):
     relevant_files: NotRequired[list[FileMemorySummary]]
     relevant_apis: NotRequired[list[ApiIndexEntry]]
     relevant_flows: NotRequired[list[FlowIndexEntry]]
+    query_hints: NotRequired[list[QueryHint]]
+    routed_skills: NotRequired[list[RoutedSkillInfo]]
     related_files: NotRequired[list[str]]
     related_apis: NotRequired[list[str]]
     related_flows: NotRequired[list[str]]
@@ -136,6 +141,7 @@ class AskState(TypedDict):
     tool_calls: NotRequired[list[ToolCallRecord]]
     code_evidence: NotRequired[list[CodeEvidence]]
     context_pack: NotRequired[ContextPack]
+    skill_answer_prompts: NotRequired[list[str]]
     key_code_notes: NotRequired[list[str]]
     answer: NotRequired[str]
     warnings: NotRequired[list[str]]
@@ -151,7 +157,7 @@ def run_ask_mode(
 
     repo_map = build_repo_map(scan_project(project_path))
     project_memory = get_project_memory(project_path)
-    if project_memory is None:
+    if project_memory is None or project_memory.knowledge_index_version != KNOWLEDGE_INDEX_VERSION:
         project_memory = save_project_memory(build_project_memory(repo_map))
     active_session_memory = session_memory or get_session_memory(project_path) or SessionMemory(project_id=project_id_for_path(project_path))
 
@@ -167,6 +173,8 @@ def run_ask_mode(
             "relevant_files": [],
             "relevant_apis": [],
             "relevant_flows": [],
+            "query_hints": [],
+            "routed_skills": [],
             "related_files": [],
             "related_apis": [],
             "related_flows": [],
@@ -174,6 +182,7 @@ def run_ask_mode(
             "references": [],
             "tool_calls": [],
             "code_evidence": [],
+            "skill_answer_prompts": [],
             "key_code_notes": [],
             "warnings": [],
             "trace_events": [],
@@ -189,6 +198,8 @@ def run_ask_mode(
         intent_result=state.get("intent_result"),
         tool_plan=state.get("tool_plan"),
         context_pack=state.get("context_pack"),
+        routed_skills=state.get("routed_skills", []),
+        query_hints=state.get("query_hints", []),
         code_evidence=_dedupe_code_evidence(state.get("code_evidence", [])),
         related_files=_dedupe_strings(state.get("related_files", [])),
         implementation_path=_dedupe_strings(state.get("implementation_path", [])),
@@ -227,6 +238,7 @@ def _build_graph() -> Any:
     graph = StateGraph(AskState)
     graph.add_node("QueryRewriter", _query_rewriter)
     graph.add_node("IntentClassifier", _intent_classifier)
+    graph.add_node("SkillRouter", _skill_router)
     graph.add_node("ContextRetriever", _context_retriever)
     graph.add_node("ToolPlanner", _tool_planner)
     graph.add_node("EvidenceCollector", _evidence_collector)
@@ -235,7 +247,8 @@ def _build_graph() -> Any:
     graph.add_node("MemoryUpdater", _memory_updater)
     graph.set_entry_point("QueryRewriter")
     graph.add_edge("QueryRewriter", "IntentClassifier")
-    graph.add_edge("IntentClassifier", "ContextRetriever")
+    graph.add_edge("IntentClassifier", "SkillRouter")
+    graph.add_edge("SkillRouter", "ContextRetriever")
     graph.add_edge("ContextRetriever", "ToolPlanner")
     graph.add_edge("ToolPlanner", "EvidenceCollector")
     graph.add_edge("EvidenceCollector", "ContextBuilder")
@@ -291,6 +304,21 @@ def _intent_classifier(state: AskState) -> AskState:
     }
 
 
+def _skill_router(state: AskState) -> AskState:
+    routed_skills = default_skill_registry().route_query_skills(
+        state["resolved_query"],
+        state["intent_result"],
+        state["project_memory"],
+        state["session_memory"],
+    )
+    names = ", ".join(skill.name for skill in routed_skills) or "none"
+    return {
+        **state,
+        "routed_skills": routed_skills,
+        "trace_events": _append_trace(state, "Skill Router", "问题级 Skill 路由", f"Routed skills for this Ask turn: {names}."),
+    }
+
+
 def _classify_intent_result(resolved_query: ResolvedQuery, project_memory: ProjectMemory, session_memory: SessionMemory | None) -> IntentResult:
     question = resolved_query.resolved_question
     lowered = question.lower()
@@ -302,13 +330,15 @@ def _classify_intent_result(resolved_query: ResolvedQuery, project_memory: Proje
 
     if any(keyword in lowered for keyword in ("技术栈", "框架", "framework", "dependencies", "依赖")):
         intent: AskIntent = "tech_stack"
+    elif any(keyword in original_lowered for keyword in ("接口", "api", "endpoint", "调用", "where is this called")):
+        intent = "api_lookup"
     elif any(keyword in lowered for keyword in ("配置", "数据库", "application.yml", "application.properties", ".env", "pom.xml", "package.json", "vite.config")):
         intent = "config_lookup"
     elif session_memory and _is_followup(resolved_query.original_question) and session_memory.turns and not any(
         keyword in original_lowered for keyword in ("接口", "api", "endpoint", "调用", "where")
     ):
         intent = normalize_ask_intent(session_memory.turns[-1].intent)
-    elif possible_apis or any(keyword in lowered for keyword in ("接口", "api", "endpoint", "在哪里被调用", "where is this called")):
+    elif possible_apis:
         intent = "api_lookup"
     elif any(keyword in lowered for keyword in ("调用链", "流程", "怎么走", "数据从哪里", "登录流程", "认证流程", "auth flow", "flow")):
         intent = "flow_trace"
@@ -346,11 +376,14 @@ def _context_retriever(state: AskState) -> AskState:
     resolved = state["resolved_query"]
     intent_result = state["intent_result"]
     question = resolved.resolved_question
+    routed_skills = state.get("routed_skills", [])
+    query_hints = default_skill_registry().collect_query_hints(resolved, state["session_memory"], routed_skills)
+    hinted_question = _question_with_hints(question, query_hints)
 
-    modules = _rank_modules(memory, question, resolved)
-    files = _rank_files(memory, question, resolved, intent_result)
-    apis = _rank_apis(memory, question, resolved)
-    flows = _rank_flows(memory, question, resolved)
+    modules = _rank_modules(memory, hinted_question, resolved)
+    files = _rank_files(memory, hinted_question, resolved, intent_result)
+    apis = _rank_apis(memory, hinted_question, resolved)
+    flows = _rank_flows(memory, hinted_question, resolved)
 
     if intent_result.intent == "project_overview":
         files = memory.file_summaries[:6]
@@ -406,6 +439,7 @@ def _context_retriever(state: AskState) -> AskState:
         "relevant_files": files[:10],
         "relevant_apis": apis[:8],
         "relevant_flows": flows[:6],
+        "query_hints": query_hints,
         "related_files": related_files[:20],
         "related_apis": related_apis[:12],
         "related_flows": related_flows[:8],
@@ -414,14 +448,15 @@ def _context_retriever(state: AskState) -> AskState:
             state,
             "Context Retriever",
             "混合检索",
-            f"Retrieved {len(context)} context items, {len(related_files)} files, {len(related_apis)} APIs.",
+            f"Retrieved {len(context)} context items, {len(related_files)} files, {len(related_apis)} APIs, {len(query_hints)} skill hints from {len(routed_skills)} routed skills.",
         ),
     }
 
 
 def _tool_planner(state: AskState) -> AskState:
     intent_result = state["intent_result"]
-    question = state["resolved_query"].resolved_question
+    resolved = state["resolved_query"]
+    question = resolved.resolved_question
     related_files = state.get("related_files", [])
     related_apis = state.get("related_apis", [])
     planned: list[PlannedToolCall] = []
@@ -429,7 +464,13 @@ def _tool_planner(state: AskState) -> AskState:
     def add(tool_name: str, args: dict[str, object], purpose: str) -> None:
         if len(planned) >= MAX_TOOL_CALLS:
             return
+        key = (tool_name, tuple(sorted(args.items())))
+        if any((item.tool_name, tuple(sorted(item.args.items()))) == key for item in planned):
+            return
         planned.append(PlannedToolCall(tool_name=tool_name, args=args, purpose=purpose))
+
+    for skill_plan in default_skill_registry().collect_tool_plans(resolved, state.get("retrieved_context", []), state.get("routed_skills", [])):
+        add(skill_plan.tool_name, skill_plan.args, skill_plan.purpose)
 
     if intent_result.intent == "project_overview":
         if not state.get("retrieved_context"):
@@ -466,7 +507,7 @@ def _tool_planner(state: AskState) -> AskState:
     elif intent_result.need_code_evidence:
         add("search_keyword", {"keyword": _search_query(question)}, "问题涉及具体实现，需要搜索真实代码。")
 
-    reason = "问题涉及具体实现，需要只读工具补充代码证据。" if planned else "项目记忆和索引足以回答该问题。"
+    reason = "问题涉及具体实现或命中 Skill 建议，需要只读工具补充代码证据。" if planned else "项目记忆和索引足以回答该问题。"
     plan = ToolPlan(need_tools=bool(planned), reason=reason, tool_calls=planned)
     return {
         **state,
@@ -512,6 +553,13 @@ def _context_builder(state: AskState) -> AskState:
     resolved = state["resolved_query"]
     memory_evidence = _memory_evidence(state)
     evidence = _dedupe_code_evidence([*state.get("code_evidence", []), *memory_evidence])
+    skill_answer_prompts = default_skill_registry().collect_answer_prompts(state.get("routed_skills", []))
+    answer_instructions = (
+        "先直接回答用户问题；列出相关文件路径；涉及流程时给出候选调用链；"
+        "涉及具体实现时引用代码证据；没有明确证据时说明当前代码中未找到明确证据。"
+    )
+    if skill_answer_prompts:
+        answer_instructions = f"{answer_instructions} Skill 回答提示：{' '.join(skill_answer_prompts)}"
     pack = ContextPack(
         user_question=state["question"],
         resolved_question=resolved.resolved_question,
@@ -522,10 +570,7 @@ def _context_builder(state: AskState) -> AskState:
         relevant_apis=state.get("relevant_apis", []),
         relevant_flows=state.get("relevant_flows", []),
         code_evidence=evidence,
-        answer_instructions=(
-            "先直接回答用户问题；列出相关文件路径；涉及流程时给出候选调用链；"
-            "涉及具体实现时引用代码证据；没有明确证据时说明当前代码中未找到明确证据。"
-        ),
+        answer_instructions=answer_instructions,
     )
     pack = _apply_context_budget(pack)
     warnings = list(state.get("warnings", []))
@@ -535,6 +580,7 @@ def _context_builder(state: AskState) -> AskState:
         **state,
         "context_pack": pack,
         "code_evidence": pack.code_evidence,
+        "skill_answer_prompts": skill_answer_prompts,
         "warnings": _dedupe_strings(warnings),
         "trace_events": _append_trace(state, "Context Builder", "Context Pack", f"Built Context Pack with {len(pack.code_evidence)} evidence items."),
     }
@@ -964,6 +1010,13 @@ def _score_text(question: str, values: list[str]) -> float:
             score += 3
         score += sum(1 for keyword in keywords if keyword.lower() in lowered) * 1.2
     return score
+
+
+def _question_with_hints(question: str, hints: list[QueryHint]) -> str:
+    if not hints:
+        return question
+    keywords = " ".join(hint.keyword for hint in sorted(hints, key=lambda item: item.priority, reverse=True)[:12])
+    return f"{question} {keywords}"
 
 
 def _session_score(values: list[str], session_values: list[str]) -> float:

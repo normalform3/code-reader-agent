@@ -224,6 +224,7 @@ type Interpretation = {
   analysis_goal?: string;
   analysis_plan?: AnalysisPlanItem[];
   selected_skills?: string[];
+  active_skills?: ActiveSkillInfo[];
   context_snapshot?: ContextSnapshot;
   project_manual?: ProjectManual;
   project_memory?: ProjectMemory | null;
@@ -255,6 +256,12 @@ type Interpretation = {
     tool_name: string | null;
     status: "success" | "error";
   }>;
+};
+
+type ActiveSkillInfo = {
+  name: string;
+  confidence: number;
+  reason: string;
 };
 
 type ProjectMemoryOverview = {
@@ -342,6 +349,19 @@ type ContextPack = {
   truncated: boolean;
 };
 
+type QueryHint = {
+  keyword: string;
+  reason: string;
+  priority: number;
+};
+
+type RoutedSkillInfo = {
+  name: string;
+  confidence: number;
+  reason: string;
+  signals: string[];
+};
+
 type SessionMemoryTurn = {
   question: string;
   intent: AskIntent;
@@ -366,6 +386,8 @@ type AskModeResult = {
   intent_result: IntentResult | null;
   tool_plan: ToolPlan | null;
   context_pack: ContextPack | null;
+  routed_skills: RoutedSkillInfo[];
+  query_hints: QueryHint[];
   code_evidence: CodeEvidence[];
   related_files: string[];
   implementation_path: string[];
@@ -1145,7 +1167,10 @@ function AgentPanel({
             {askResult?.tool_calls.slice(0, 4).map((call, index) => (
               <code key={`${call.tool_name}-${index}`}>{call.tool_name}</code>
             ))}
-            {interpretation?.selected_skills?.map((skill) => <code key={skill}>{skill}</code>) ?? null}
+            {askResult?.routed_skills.slice(0, 4).map((skill) => (
+              <code key={`ask-${skill.name}`}>{skill.name}</code>
+            ))}
+            {(interpretation?.active_skills?.length ? interpretation.active_skills.map((skill) => skill.name) : interpretation?.selected_skills)?.map((skill) => <code key={skill}>{skill}</code>) ?? null}
             {askResult ? <span className="muted">{askResult.code_evidence.length || askResult.references.length} 条 Ask evidence · {askResult.session_memory.turns.length} 轮记忆</span> : null}
             {interpretation?.context_snapshot ? (
               <span className="muted">
@@ -1161,6 +1186,22 @@ function AgentPanel({
             {askResult?.tool_plan ? (
               <p className="context-note">
                 {askResult.tool_plan.reason}
+              </p>
+            ) : null}
+            {interpretation?.active_skills?.length ? (
+              <div className="step-list">
+                {interpretation.active_skills.slice(0, 6).map((skill) => (
+                  <div className="step-row" data-status="success" key={skill.name}>
+                    <span>{Math.round(skill.confidence * 100)}%</span>
+                    <strong>{skill.name}</strong>
+                    <small>{skill.reason}</small>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {askResult?.query_hints?.length ? (
+              <p className="context-note">
+                Routed skills: {askResult.routed_skills.slice(0, 5).map((skill) => skill.name).join(", ") || "none"} · Skill hints: {askResult.query_hints.slice(0, 6).map((hint) => hint.keyword).join(", ")}
               </p>
             ) : null}
           </details>

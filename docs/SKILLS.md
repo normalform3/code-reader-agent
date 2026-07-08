@@ -2,45 +2,107 @@
 
 ## 设计目标
 
-Skill 用于把常见代码理解任务固化为可复用流程。MVP 中 Skill Registry 先根据 Repo Map 的技术栈选择 `CodebaseOverviewSkill`、`VueSkill`、`SpringBootSkill` 等能力，再由 Analyzer 和 Report Writer 生成结构化项目解读报告。
+Skill 用于把常见代码理解任务固化为可复用流程。它不是单纯提示词，也不是让模型直接回答问题的快捷方式，而是面向特定技术栈的代码理解插件。
+
+当前定义：
+
+```text
+Skill = 技术栈名称 + 激活条件 + 扫描函数 + 解析规则 + 索引构建逻辑 + 检索提示 + 回答提示词
+```
+
+MVP 中 Skill Registry 基于 Repo Map、依赖、文件结构和轻量只读解析激活 `JavaWebSkill`、`SpringBootSkill`、`MyBatisSkill`、`VueSkill`、`RestApiSkill` 等能力。Skill 扫描结果会沉淀到 ProjectMemory 的 Code Knowledge Index，再由 Analyzer、Report Writer 和 Ask 模式复用。
 
 每个 skill 都需要定义：
 
 - 适用场景。
-- 触发条件。
-- 优先搜索关键词。
-- 优先读取文件。
-- 可用 tools。
-- 上下文选择策略。
-- 输出格式。
+- 激活条件和置信度。
+- 扫描目标和只读工具边界。
+- 解析规则。
+- 输出到 Code Knowledge Index 的结构化字段。
+- Ask query hints。
+- Ask tool plan hints。
+- Answer Composer 的回答组织提示。
 - 验证方式。
 - 失败处理方式。
 
 ## MVP Skill Registry
 
-当前 `/api/agent/run` 的 `selected_skills` 来自 deterministic Skill Registry：
+当前 `/api/agent/run` 的 `selected_skills` 和 `active_skills` 来自运行时 Skill Registry：
 
 - `CodebaseOverviewSkill`：默认启用，负责项目地图、模块说明、关键入口和阅读路线。
-- `VueSkill`：当 Repo Map 检测到 Vue、Vite、Vue Router 或 Pinia 时启用。
-- `SpringBootSkill`：当 Repo Map 检测到 Java、Maven、Gradle、Spring Boot、Spring Web 或 Spring Security 时启用。
-- `ApiFlowCandidateSkill`：当 Repo Map 有接口候选时启用，只输出候选证据。
-- `AuthFlowCandidateSkill`：当 Repo Map 有认证候选时启用，只输出候选证据。
+- `JavaWebSkill`：识别 Controller、Service、Mapper/Repository、Entity/DTO/VO 分层。
+- `SpringBootSkill`：识别 Spring Boot 启动类、配置、Controller 接口和安全配置。
+- `MyBatisSkill`：识别 Mapper、XML、SQL、实体/表映射候选。
+- `VueSkill`：识别 Vue 入口、路由、页面、组件、状态和 API 调用。
+- `RestApiSkill`：识别前后端接口定义、调用和映射候选。
+- `ApiFlowCandidateSkill` / `AuthFlowCandidateSkill`：兼容旧展示字段，用于标记 Repo Map 中已有 API/auth 候选。
 
 MVP 不实现插件式动态 skill 加载，也不声称完成精准调用链追踪。
 
+`active_skills` 会返回：
+
+- skill 名称。
+- 置信度。
+- 激活原因。
+
+## Code Knowledge Index 写入
+
+Skill 扫描结果不会只生成自然语言报告，而是写入结构化索引：
+
+- Java Web / Spring Boot：`file_summaries`、`module_summaries`、`symbol_index`、`api_index`、入口和配置文件。
+- MyBatis：`data_model_index`、`mapper_relations`、Mapper/XML 文件和 SQL/table 候选。
+- Vue：`route_index`、`frontend_api_call_index`、前端 File Summary 和 Symbol Index。
+- REST API：合并后端 Controller endpoint 和前端 API call，补充 `api_index` 和 `flow_index` 候选。
+
+这些索引统一存放在 `ProjectMemory` 中，版本字段为 `knowledge_index_version`。Ask 模式读到旧版 ProjectMemory 时会自动基于当前 Repo Map 重建索引。
+
+## 两层轻量 Skill 路由
+
+Skill Router 当前分为两层：
+
+- 项目级 Skill 路由：首次扫描后，`SkillRegistry` 遍历内置 Skill，执行 `detect(repo_map)`，根据 matched、confidence 和 reason 生成 ActiveSkill。只有 ActiveSkill 会执行 `scan()` 并把结果写入 Code Knowledge Index。
+- 问题级 Skill 路由：Ask 模式中，`SkillRouter` 只从 `ProjectMemory.active_skills` 中选择本轮相关 Skill。判断依据包括 intent、关键词、索引命中、resolved query 引用和 Session Memory 关注点。
+
+当前保持轻量路由，不做复杂多 Agent 编排。这样可以减少上下文噪声和无效工具调用，同时保留可解释 trace 和确定性测试边界。后续可扩展为工具级路由和更复杂的 Skill 编排。
+
 ## Ask Intent 与 Skill 关系
 
-Ask 模式先做问题意图分类，再选择上下文和只读工具。当前支持：
+Ask 模式先做问题意图分类，再选择上下文和只读工具。Skill 在 Ask 中只辅助上下文获取，不直接回答用户。
+
+流程：
+
+```text
+Query Rewriter
+-> Intent Classifier
+-> SkillRouter 从 active skills 中选择 routed skills
+-> Context Retriever 检索 Project Memory 和 Code Knowledge Index，并使用 routed skill query hints
+-> Tool Planner 合并 routed skill tool plan hints
+-> Evidence Collector 执行只读工具
+-> Context Builder 合并 routed skill answer prompts
+-> Answer Composer 基于 evidence 回答
+```
+
+当前支持 intent：
 
 - `project_overview`：优先检索 Project Memory。
 - `module_explanation`：检索 Module Summary、API Index 和相关 File Summary。
 - `file_explanation`：定位 File Summary，必要时调用 `read_file`。
-- `call_chain`：检索 Flow Index，并读取关键文件补证据。
-- `api_usage`：检索 API Index，并调用 `parse_api_calls`、`parse_controller` 或 `search_keyword`。
-- `configuration`：检索配置文件和依赖摘要，并调用 `parse_dependencies`。
+- `flow_trace`：检索 Flow Index，并读取关键文件补证据。
+- `api_lookup`：检索 API Index，并调用 `parse_api_calls`、`parse_controller` 或 `search_keyword`。
+- `config_lookup`：检索配置文件和依赖摘要，并调用 `parse_dependencies`。
 - `tech_stack`：检索依赖文件和 Project Memory。
+- `symbol_lookup`：检索 Symbol Index，并按需调用 `search_symbol`。
 
-这些 intent 不替代 `VueSkill`、`SpringBootSkill` 等技术栈 skill；它们负责 Ask 模式的路由和上下文选择。技术栈 skill 仍负责决定哪些文件、关键词和证据更值得优先读取。
+这些 intent 不替代技术栈 skill；intent 负责问题路由，Skill 负责决定哪些文件、关键词和证据更值得优先读取。
+
+示例：用户问“登录功能是怎么实现的？”
+
+- `SpringBootSkill` 可能提供 `AuthController`、`SecurityConfig`、`Jwt`、`UserDetailsService`。
+- `JavaWebSkill` 可能提供 `AuthService`、`UserService`、`UserMapper`。
+- `VueSkill` 可能提供 `Login.vue`、`auth.ts`、`src/api`。
+- `RestApiSkill` 可能提供 `/login`、`/auth` 和前后端 API 搜索建议。
+
+Tool Planner 再把这些 hints 转成只读工具计划。最终回答必须基于 `read_file`、`search_keyword`、`parse_controller`、`parse_api_calls` 等 evidence，而不是根据 Skill prompt 猜测。
 
 前端 Skill 管理弹窗通过本地 registry API 展示和编辑 skill 元数据。该 registry 保存到 `.codereader/state.json`，也可以通过 `CODEREADER_STATE_DIR/state.json` 覆盖。
 

@@ -17,10 +17,11 @@ from code_reader_agent.models import (
     RepoMap,
     SymbolIndexItem,
 )
+from code_reader_agent.skills.registry import default_skill_registry
 from code_reader_agent.tools.read_only import parse_api_calls, parse_controller
 
 
-def build_project_memory(repo_map: RepoMap, project_manual: ProjectManual | None = None) -> ProjectMemory:
+def build_project_memory(repo_map: RepoMap, project_manual: ProjectManual | None = None, *, include_skills: bool = True) -> ProjectMemory:
     """Build reusable Ask mode memory from deterministic Repo Map data."""
 
     api_index = _api_index(repo_map)
@@ -50,6 +51,8 @@ def build_project_memory(repo_map: RepoMap, project_manual: ProjectManual | None
     )
     project_memory.flow_index = _flow_index(repo_map, project_memory.api_index)
     project_memory.symbol_index = _symbol_index(project_memory.file_summaries)
+    if include_skills:
+        project_memory = default_skill_registry().build_indexes(repo_map, project_memory)
     return project_memory
 
 

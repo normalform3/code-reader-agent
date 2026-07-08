@@ -31,13 +31,13 @@ CodeReader Agent 的目标是把这些理解过程变成两阶段工作流：第
 - Planner 生成分析计划。
 - Tool Executor 按计划调用只读工具扫描项目、读取配置、搜索代码并构建 Repo Map。
 - Context Manager 管理项目上下文、任务上下文、符号上下文和当前记忆上下文。
-- Skill Registry 根据技术栈选择 `SpringBootSkill`、`VueSkill` 或通用理解 skill。
+- Skill Registry 根据技术栈激活 `JavaWebSkill`、`SpringBootSkill`、`MyBatisSkill`、`VueSkill`、`RestApiSkill` 或通用理解 skill。
 - 识别技术栈、目录结构、包管理器、启动命令和入口文件。
 - 生成结构化 Repo Map。
 - 识别核心模块、接口调用链、登录认证流程和状态管理逻辑。
 - Analyzer 和 Report Writer 输出项目地图、模块说明、关键入口、阅读路线、调用链候选和证据。
 - Trace Logger 记录计划、工具调用、上下文更新和最终产物。
-- 报告生成后沉淀 `ProjectMemory` 和 Code Knowledge Index，包含 Project Memory、Module Summary、File Summary、API Index、Symbol Index 和 Flow Index。
+- 报告生成后沉淀 `ProjectMemory` 和 Code Knowledge Index，包含 Project Memory、Module Summary、File Summary、API Index、Symbol Index、Flow Index、Route Index、Frontend API Call Index、Data Model Index 和 Mapper Relation 候选。
 - Ask 模式通过 Query Rewriter、Intent Classifier、Context Retriever、Tool Planner、Evidence Collector、Context Builder、Answer Composer 和 Memory Updater 回答追问，并更新 `SessionMemory`。
 
 ## 核心用户痛点
@@ -108,11 +108,31 @@ CodeReader Agent 的目标是把这些理解过程变成两阶段工作流：第
 
 - Repo Map：把项目结构、模块、文件角色、依赖、入口和证据保存为结构化数据。
 - Evidence Tracking：回答必须尽量引用已读取文件、路径和片段，避免凭空猜测。
-- Skill Registry：根据项目技术栈选择 `SpringBootSkill`、`VueSkill` 或通用理解 skill。
+- Skill Registry：Skill 不是单纯提示词，而是“技术栈名称 + 激活条件 + 扫描函数 + 解析规则 + 索引构建逻辑 + 检索提示 + 回答提示词”的代码理解插件；当前可根据项目技术栈激活 Java Web、Spring Boot、MyBatis、Vue 和 REST API Skill。
+- Skill Router：在现有 Skill Registry 上提供两层轻量路由。项目扫描阶段只激活真实命中的技术栈 Skill，并且只有 ActiveSkill 参与 scan/buildIndex；Ask 阶段再根据问题意图、关键词、Code Knowledge Index 命中和 Session Memory 选择本轮 routed skills。
 - Planner / Context / Report / Trace：让用户看到分析计划、上下文选择、最终报告和执行轨迹。
 - Read-only Tools：第一版工具默认只读，任何写文件或运行命令的能力都需要用户确认。
 - Agent Panel：展示分析目标、Planner 计划、Skill Registry、Context Snapshot、Report、Agent Steps 和 Trace Logger。
 - Codebase Map：展示模块树、文件树和后续的模块关系图。
+
+## Skill Router
+
+Skill 是技术栈级代码理解插件，不是单纯提示词。每个 Skill 包含名称、激活条件、扫描规则、解析函数、索引构建逻辑、query hints、tool plan hints 和 answer prompt。
+
+当前实现是轻量级两层路由：
+
+1. 项目级路由：首次扫描后，`SkillRegistry` 遍历内置 Skill，执行 `detect(repo_map)`，根据 `matched`、`confidence` 和 `reason` 生成 ActiveSkill 列表。只有 ActiveSkill 会执行 `scan()` 并把结果写入 ProjectMemory 的 Code Knowledge Index。
+2. 问题级路由：Ask 模式中，`SkillRouter` 只从 `active_skills` 中选择本轮相关 Skill。路由依据包括 resolved query、intent、关键词、Code Knowledge Index 命中、Session Memory 的关注文件/API/流程。
+
+当前支持的内置 Skill：
+
+- `JavaWebSkill`
+- `SpringBootSkill`
+- `MyBatisSkill`
+- `VueSkill`
+- `RestApiSkill`
+
+这套路由当前不做复杂多 Agent 编排，也不做工具级动态路由。Skill 只负责帮助检索上下文、规划只读工具和组织回答；涉及具体实现时仍然必须通过 `read_file`、`search_keyword`、`parse_controller`、`parse_api_calls` 等只读工具读取真实代码证据。后续可以扩展为工具级路由和更复杂的 Skill 编排，但第一版优先保持可解释、可测试、低噪声。
 
 ## 技术栈
 
@@ -171,7 +191,8 @@ npm run dev
 - Web UI 已支持输入公开 GitHub 仓库链接、触发导入和分析、展示技术栈、入口文件、模块卡片、模块详情、分析计划、技能选择、上下文快照、结构化报告、工具调用、trace、证据和提醒。
 - Agent 项目解读支持可选 LLM tool loop；LLM 不可用时仍输出完整 plan、context、report 和 trace。
 - `/api/agent/run` 会返回并保存 `project_memory`；`/api/agent/ask` 会返回 resolved query、intent result、tool plan、Context Pack、code evidence、answer、related files、implementation path、references、tool calls、trace events 和 session memory。
-- Agent 解释已支持最小 Skill Registry，可按检测到的栈选择 `CodebaseOverviewSkill`、`VueSkill` 和 `SpringBootSkill`。
+- Agent 解释已支持运行时 Skill Registry，可按检测到的栈选择 `CodebaseOverviewSkill`、`JavaWebSkill`、`SpringBootSkill`、`MyBatisSkill`、`VueSkill` 和 `RestApiSkill`，并返回激活置信度和原因。
+- Skill 扫描结果会写入 Code Knowledge Index；Ask 模式会使用 Skill query hints 和 tool plan hints 辅助检索，但回答仍必须基于 Project Memory、索引命中和只读工具证据。
 - Repo Map 和 Agent 解释已支持片段级 evidence、已读取文件和工具调用记录。
 - 已有基础测试覆盖扫描、Repo Map、解释器、Ask 模式和 API 行为。
 
@@ -191,7 +212,7 @@ npm run dev
 2. 扩充 Project Memory：提高 API Index、Symbol Index、Flow Index、File Summary 的覆盖面。
 3. 完善 Web UI：让 Ask trace、工具调用、证据和 Session Memory 更清楚。
 4. 强化证据追踪：让每个模块、入口、运行命令和 Ask 回答都能关联到明确文件路径或配置来源。
-5. 扩展专项 skill：逐步增强 Spring Boot 分层结构、Vue 页面结构、API 调用链候选和认证流程候选。
+5. 扩展专项 skill：继续增强 Spring Boot 分层结构、Vue 页面结构、API 调用链候选、MyBatis 映射候选和认证流程候选。
 
 中期计划：
 

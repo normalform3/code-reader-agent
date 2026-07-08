@@ -30,7 +30,8 @@ Frontend UI
 -> Planner 生成分析计划
 -> Tool Executor 调用只读工具扫描、读取、搜索和构建 Repo Map
 -> Context Manager 组织项目、任务、符号和当前记忆上下文
--> Skill Registry 根据技术栈选择 skill
+-> Skill Registry 根据技术栈检测并激活 skill
+-> 只有 ActiveSkill 参与 scan 和 Code Knowledge Index 构建
 -> Analyzer 生成理解结果
 -> Report Writer 输出结构化项目解读报告
 -> Trace Logger 记录计划、工具调用、上下文更新和最终产物
@@ -39,6 +40,7 @@ Frontend UI
 -> 用户在右侧 Ask 边栏追问
 -> Query Rewriter 结合 Session Memory 做指代消解
 -> Intent Classifier 识别问题类型
+-> SkillRouter 从 active skills 中选择本轮相关 Skill
 -> Context Retriever 检索 Project Memory / Module Summary / File Summary / API Index / Symbol Index / Flow Index / Session Memory
 -> Tool Planner 判断是否需要只读工具
 -> Evidence Collector 读取真实代码、配置或索引
@@ -202,17 +204,29 @@ Ask 模式新增只读工具：
 
 职责：
 
-- 根据 Repo Map 和 detected stack 选择分析 skill。
-- 为不同任务定义搜索关键词、优先读取文件、上下文选择策略和输出格式。
-- 避免每个问题都从零设计分析流程。
+- 注册技术栈 Skill，并根据 Repo Map、依赖、文件结构和轻量解析结果检测 active skills。
+- 执行 active skill 的扫描函数，把结果合并进 ProjectMemory 的 Code Knowledge Index。
+- 为 Ask 模式提供 query hints、只读 tool plan hints 和回答组织提示。
+- 避免每个问题都从零设计分析流程，同时避免让 Skill 直接替代 evidence-based 回答。
 
-当前 MVP skill：
+Skill 定义不是单纯提示词，而是：
+
+```text
+Skill = 技术栈名称 + 激活条件 + 扫描函数 + 解析规则 + 索引构建逻辑 + 检索提示 + 回答提示词
+```
+
+当前 MVP runtime skill：
 
 - `CodebaseOverviewSkill`
+- `JavaWebSkill`
 - `VueSkill`
 - `SpringBootSkill`
-- `ApiFlowCandidateSkill`
-- `AuthFlowCandidateSkill`
+- `MyBatisSkill`
+- `RestApiSkill`
+
+首次分析时，Skill Registry 在 Repo Map 之后运行，返回 active skill 名称、置信度和激活原因；各 Skill 的扫描结果会沉淀到 File Summary、API Index、Symbol Index、Flow Index、Route Index、Frontend API Call Index、Data Model Index 和 Mapper Relation 候选。
+
+Ask 模式中，SkillRouter 只从 active skills 中选择本轮相关 Skill。路由依据包括问题意图、关键词、Code Knowledge Index 命中和 Session Memory 关注点。只有 routed skills 会参与上下文获取和工具规划：它可以建议 `search_keyword("AuthController")`、`parse_controller()` 或 `parse_api_calls()`，但最终回答仍必须来自 Project Memory、Code Knowledge Index 和只读工具 evidence。
 
 ## Context Manager 层
 

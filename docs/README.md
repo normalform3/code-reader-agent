@@ -9,6 +9,10 @@
 - `TOOLS.md`：工具系统和安全边界。
 - `CONTEXT_MANAGER.md`：上下文管理策略。
 - `ASK_MODE.md`：报告后的 Ask 模式流程、上下文层和输出契约。
+- `design.md`：轻量级两层 Skill Router 设计。
+- `skill-system.md`：Skill 定义、Code Knowledge Index 写入和路由规则。
+- `ask-mode.md`：Ask 模式与问题级 SkillRouter。
+- `context-management.md`：Context Pack 与 routed skill hints。
 - `AGENTS.md`：多 Agent 协作设计。
 - `ROADMAP.md`：开发路线。
 - `DECISIONS.md`：技术决策记录。

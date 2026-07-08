@@ -7,6 +7,7 @@ from hashlib import sha1
 from code_reader_agent.models import (
     AgentRunResult,
     AgentStep,
+    ActiveSkillInfo,
     AnalysisPlanItem,
     ContextSnapshot,
     EvidenceRef,
@@ -25,6 +26,7 @@ from code_reader_agent.models import (
 from code_reader_agent.memory.project_memory import build_project_memory
 from code_reader_agent.repo_map.builder import build_repo_map
 from code_reader_agent.scanner import scan_project
+from code_reader_agent.skills.registry import default_skill_registry
 
 
 def enrich_agent_run_result(
@@ -49,6 +51,8 @@ def enrich_agent_run_result(
     """Attach plan, skills, context, report, and trace to an agent run."""
 
     repo_map = build_repo_map(scan_project(project_path))
+    active_skills = default_skill_registry().detect_active_skills(repo_map)
+    active_skill_infos = [item.to_info() for item in active_skills]
     selected_skills = select_skills(repo_map)
     analysis_goal = build_analysis_goal(question)
     analysis_plan = build_analysis_plan(question, repo_map, selected_skills)
@@ -73,6 +77,7 @@ def enrich_agent_run_result(
     trace_events = build_trace_events(
         analysis_plan=analysis_plan,
         selected_skills=selected_skills,
+        active_skills=active_skill_infos,
         context_snapshot=context_snapshot,
         tool_calls=tool_calls,
         agent_steps=agent_steps,
@@ -126,12 +131,8 @@ def build_analysis_goal(question: str) -> str:
 def select_skills(repo_map: RepoMap) -> list[str]:
     """Select first-version skills from detected stack tags."""
 
-    stack_names = {tag.name for tag in repo_map.detected_stack}
     skills = ["CodebaseOverviewSkill"]
-    if stack_names & {"Spring Boot", "Spring Web", "Spring Security", "Maven", "Gradle", "Java"}:
-        skills.append("SpringBootSkill")
-    if stack_names & {"Vue", "Vite", "Vue Router", "Pinia"}:
-        skills.append("VueSkill")
+    skills.extend(item.skill.name for item in default_skill_registry().detect_active_skills(repo_map))
     if repo_map.api_endpoints or repo_map.api_flows:
         skills.append("ApiFlowCandidateSkill")
     if repo_map.auth_flows:
@@ -340,6 +341,7 @@ def build_trace_events(
     *,
     analysis_plan: list[AnalysisPlanItem],
     selected_skills: list[str],
+    active_skills: list[ActiveSkillInfo],
     context_snapshot: ContextSnapshot,
     tool_calls: list[ToolCallRecord],
     agent_steps: list[AgentStep],
@@ -366,7 +368,7 @@ def build_trace_events(
             index=len(events) + 1,
             stage="Skill Registry",
             title="Skill selection",
-            summary=", ".join(selected_skills),
+            summary=_skill_trace_summary(selected_skills, active_skills),
         )
     )
     events.append(
@@ -461,3 +463,13 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(value)
         unique.append(value)
     return unique
+
+
+def _skill_trace_summary(selected_skills: list[str], active_skills: list[ActiveSkillInfo]) -> str:
+    if not active_skills:
+        return ", ".join(selected_skills)
+    active_text = "; ".join(
+        f"{item.name}({item.confidence:.2f}): {item.reason}"
+        for item in active_skills[:6]
+    )
+    return f"{', '.join(selected_skills)} | active={active_text}"

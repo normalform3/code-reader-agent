@@ -12,8 +12,9 @@ MVP 中 Context Manager 有两条路径：
 Ask 模式的上下文分三层：
 
 - `Project Memory`：项目定位、技术栈、启动方式、入口、配置、依赖、模块和目录摘要。
-- `Code Knowledge Index`：Module Summary、File Summary、API Index、Symbol Index 和 Flow Index。
+- `Code Knowledge Index`：Module Summary、File Summary、API Index、Symbol Index、Flow Index、Route Index、Frontend API Call Index、Data Model Index 和 Mapper Relation 候选。
 - `Session Memory`：当前话题、关注模块、关注文件/API/流程、上一轮问题和回答摘要。
+- `Routed Skill Hints`：问题级 SkillRouter 选择出的本轮相关 Skill 提供 query hints、tool plan hints 和 answer prompts。
 
 ## 上下文类型
 
@@ -96,6 +97,10 @@ Ask 模式已经保存短期会话记忆：
 - `api_index`：接口路径、HTTP 方法、后端方法、后端文件和前端调用位置。
 - `symbol_index`：类、方法、函数、组件、接口或类型所在文件。
 - `flow_index`：调用链或登录/auth/API 流程候选。
+- `route_index`：Vue/前端路由候选。
+- `frontend_api_call_index`：前端 axios/fetch/request 调用候选。
+- `data_model_index`：实体、Mapper、SQL 和 table 候选。
+- `mapper_relations`：Mapper 到实体或 table 的候选关系。
 
 ### Answer Context
 
@@ -110,8 +115,8 @@ Ask 模式已经保存短期会话记忆：
 
 1. Planner 将用户目标转成分析计划。
 2. Tool Executor 调用只读工具生成扫描结果、Repo Map、文件片段和搜索结果。
-3. Skill Registry 根据 Repo Map 技术栈选择 skill。
-4. Context Manager 根据目标和 skill 组织 project context、task context、symbol context、memory context。
+3. Skill Registry 根据 Repo Map 激活技术栈 Skill，并把扫描结果写入 Code Knowledge Index。
+4. Context Manager 根据目标、active skills 和索引组织 project context、task context、symbol context、memory context。
 5. Analyzer 使用 Evidence Context 分析。
 6. Report Writer 生成结构化项目解读报告。
 7. Trace Logger 记录上下文更新和最终产物。
@@ -121,12 +126,13 @@ Ask 模式选择策略：
 
 1. Query Rewriter 结合 Session Memory 处理“这个 / 那个 / 继续”等追问。
 2. Intent Classifier 识别项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈、符号定位和 unknown。
-3. Context Retriever 优先从 Project Memory、Module Summary、File Summary、API Index、Symbol Index、Flow Index 和 Session Memory 检索。
-4. Tool Planner 判断上下文是否足够；凡涉及具体实现、具体文件、具体接口、具体方法或字段的问题都规划只读工具。
-5. Evidence Collector 调用 `read_file`、`search_keyword`、`search_api_path`、`parse_dependencies`、`parse_api_calls`、`parse_controller` 等只读工具，并裁剪为短证据。
-6. Context Builder 构造 `ContextPack`，只放入回答所需项目上下文、会话上下文、索引命中项和代码证据。
-7. Answer Composer 输出直接回答、相关文件、候选实现路径、关键说明和参考依据。
-8. Memory Updater 写回 Session Memory。
+3. SkillRouter 从 active skills 中选择本轮 routed skills。
+4. Context Retriever 优先从 Project Memory、Module Summary、File Summary、API Index、Symbol Index、Flow Index、Route Index、Frontend API Call Index、Data Model Index、Mapper Relation 和 Session Memory 检索，并使用 routed skill query hints。
+5. Tool Planner 判断上下文是否足够，并合并 routed skill tool plan hints；凡涉及具体实现、具体文件、具体接口、具体方法或字段的问题都规划只读工具。
+6. Evidence Collector 调用 `read_file`、`search_keyword`、`search_api_path`、`parse_dependencies`、`parse_api_calls`、`parse_controller` 等只读工具，并裁剪为短证据。
+7. Context Builder 构造 `ContextPack`，只放入回答所需项目上下文、会话上下文、索引命中项、routed skill answer prompts 和代码证据。
+8. Answer Composer 输出直接回答、相关文件、候选实现路径、关键说明和参考依据。
+9. Memory Updater 写回 Session Memory。
 
 ## Context Snapshot 输出
 
@@ -168,4 +174,4 @@ Repo Map 应保存为结构化文件或数据库记录，方便：
 - Context Manager 快速筛选文件。
 - 对比重新扫描结果。
 
-当前实现中，`ProjectMemory` 从 Repo Map 和 Project Manual 派生，并存放在 `.codereader/state.json`。Ask 回答优先使用该结构化记忆；当记忆不足时，再调用只读工具读取真实代码。
+当前实现中，`ProjectMemory` 从 Repo Map、Project Manual 和 Skill 扫描结果派生，并存放在 `.codereader/state.json`。Ask 回答优先使用该结构化记忆；当记忆不足时，再调用只读工具读取真实代码。`knowledge_index_version` 用于标记 Skill 增强索引版本，旧 state 会在 Ask 模式中自动重建。
