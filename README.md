@@ -7,8 +7,10 @@ CodeReader Agent 是一个本地运行的代码库理解 Agent，面向“快速
 用户输入公开仓库链接后，系统会将代码导入本地只读缓存，自动扫描项目结构、识别技术栈、构建 Repo Map 和代码知识索引，生成可导航、可追踪的项目说明书；随后进入 Ask 模式，用户可以围绕模块职责、接口位置、调用链、配置来源和关键代码继续追问，系统会结合项目记忆、代码索引和只读工具调用返回带文件路径、代码片段和依据的回答。
 
 ![CodeReader Agent 工作台](docs/assets/codereader-workbench.png)
+*图1 CodeReader Agent 工作台界面*
 
 ![Ask 模式展示](docs/assets/codereader-ask-sse-trace.png)
+*图2 Ask 交互模式效果展示*
 
 ## 2. 项目背景
 
