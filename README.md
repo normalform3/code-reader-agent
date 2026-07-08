@@ -1,243 +1,326 @@
 # CodeReader Agent
 
-CodeReader Agent 是一个面向陌生 Java Web / 前后端项目的代码库理解 Agent。它的核心目标不是替代开发者写代码，而是先生成结构化项目理解报告，再提供类似 GitHub Copilot Ask 的右侧追问模式，帮助用户围绕真实代码证据继续理解项目。
+## 1. 项目简介
 
-一句话定位：
+CodeReader Agent 是一个本地运行的代码库理解 Agent。用户输入公开 GitHub 仓库链接后，系统会将仓库导入到本地只读缓存，自动扫描目录结构、识别技术栈、构建 Repo Map，并生成一份可导航、可追踪、可复用的项目说明书。
 
-> CodeReader Agent 是一个面向 Java Web / 前后端项目的代码库理解 Agent，能够先生成项目地图、模块说明、关键入口和阅读路线，再把报告沉淀为 Project Memory，支持基于项目记忆和只读工具的 Ask 模式追问。
+该项目聚焦于解决“如何快速读懂一个陌生仓库”的问题。它先通过 Planner、只读工具调用、上下文管理、Skill 路由和代码知识索引生成项目级理解报告，再进入 Ask 模式，让用户围绕项目说明书继续追问模块职责、接口位置、调用链候选、配置来源和关键代码依据。
 
-它和通用 Coding Agent 的区别是：CodeReader Agent 当前不自动改代码，而是把重点放在“先把陌生代码库整理成可导航、可追踪、可复用的知识结构”，再在 Ask 模式中像 Copilot Ask 一样回答局部问题，但回答必须优先检索项目记忆并按需调用只读工具补证据。
+在 Ask 模式中，系统不会把问题直接丢给模型回答，而是先检索 Project Memory、Code Knowledge Index 和 Session Memory；当问题涉及具体实现时，再规划只读工具调用，收集文件路径、代码片段、行号和工具 trace，最终生成带证据的回答。这让 CodeReader Agent 更像一个“会读代码、会留下依据的项目导览工作台”，而不是普通聊天式代码问答。
 
-## 项目背景
+![CodeReader Agent 工作台](docs/assets/codereader-workbench.png)
 
-开发者接手一个陌生 GitHub 项目时，通常需要先回答这些问题：
+## 2. 项目背景
 
-- 项目使用什么技术栈？
-- 应该怎么启动和构建？
-- 入口文件在哪里？
-- 目录结构如何划分？
-- 核心模块有哪些？
-- 接口调用链在哪里？
-- 登录认证流程如何实现？
-- 状态管理逻辑在哪里？
-- 哪些文件最值得先看？
-- Agent 的解释是否真的来自代码证据？
+开发者接手一个陌生项目时，通常需要先人工判断项目入口、启动方式、核心模块、接口位置、前后端调用关系和推荐阅读顺序。传统文件树只能展示结构，无法解释模块职责；普通代码问答又容易缺少全局认知，甚至根据文件名和经验猜测答案。
 
-CodeReader Agent 的目标是把这些理解过程变成两阶段工作流：第一阶段先 plan、调用工具、组织上下文并输出结构化报告；第二阶段进入 Ask 模式，先识别问题意图、检索项目记忆，再按需调用只读工具读取真实代码，并让每个结论都能追溯到文件路径、代码片段或工具调用记录。
+CodeReader Agent 将这个过程拆成两个阶段：第一阶段先生成项目级理解报告，沉淀 Project Memory 和 Code Knowledge Index；第二阶段进入 Ask 模式，围绕已有项目记忆、会话记忆和只读工具继续回答追问。每个关键结论都尽量绑定文件路径、代码片段、工具调用记录或索引命中结果。
 
-## 项目目标
+## 3. 核心功能
 
-- 用户输入公开 GitHub 仓库链接后创建分析任务。
-- Planner 生成分析计划。
-- Tool Executor 按计划通过运行时 Tool Registry 调用只读工具扫描项目、读取配置、搜索代码并构建 Repo Map。
-- Context Manager 管理项目上下文、任务上下文、符号上下文和当前记忆上下文。
-- Skill Registry 根据技术栈激活 `JavaWebSkill`、`SpringBootSkill`、`MyBatisSkill`、`VueSkill`、`RestApiSkill` 或通用理解 skill。
-- 识别技术栈、目录结构、包管理器、启动命令和入口文件。
-- 生成结构化 Repo Map。
-- 识别核心模块、接口调用链、登录认证流程和状态管理逻辑。
-- Analyzer 和 Report Writer 输出项目地图、模块说明、关键入口、阅读路线、调用链候选和证据。
-- Trace Logger 记录计划、工具调用、上下文更新和最终产物。
-- 报告生成后沉淀 `ProjectMemory` 和 Code Knowledge Index，包含 Project Memory、Module Summary、File Summary、API Index、Symbol Index、Flow Index、Route Index、Frontend API Call Index、Data Model Index 和 Mapper Relation 候选。
-- Ask 模式通过 Query Rewriter、Intent Classifier、Context Retriever、Tool Planner、Evidence Collector、Context Builder、Answer Composer 和 Memory Updater 回答追问，并更新 `SessionMemory`。
+- 支持输入公开 GitHub 仓库链接，导入到本地 `.codereader/repos` 只读缓存。
+- 扫描项目文件树，跳过 `.git`、`node_modules`、构建产物、虚拟环境和缓存目录。
+- 解析 `package.json`、`pom.xml`、`build.gradle` 等配置，识别包管理器、启动脚本、Java 构建工具和依赖。
+- 识别 Vue / Vite / TypeScript / Pinia / Vue Router / Axios，以及 Java / Maven / Gradle / Spring Boot / Spring Web / MyBatis 等常见技术栈线索。
+- 构建 Repo Map，包含项目摘要、技术栈解释、目录洞察、模块列表、入口文件、文件角色、阅读建议和 evidence。
+- 通过 `/api/agent/run` 生成目标驱动项目说明书，返回 Planner 计划、Skill 选择、Context Snapshot、Report 和 Trace Events。
+- 报告生成后沉淀 Project Memory，包括项目定位、启动命令、入口、配置文件、模块摘要、文件摘要、API Index、Flow Index、Symbol Index 等。
+- Ask 模式通过 LangGraph `StateGraph` 编排问题重写、意图识别、Skill 路由、上下文检索、工具规划、证据收集、Context Pack 构造、回答生成和 Session Memory 更新。
+- 运行时 Tool Registry 统一管理 Ask 模式只读工具，支持参数校验、权限校验、路径边界校验、timeout 和调用 trace。
+- Web 工作台支持 GitHub 导入、历史项目、文件树、项目说明书、Planner、Skill Registry、Context Snapshot、Trace Logger 和右侧 Ask 边栏。
 
-## 核心用户痛点
+## 4. 技术栈
 
-- 陌生项目入口不清晰，阅读顺序靠猜。
-- 框架、路由、状态管理、请求封装散落在不同目录。
-- 代码问答工具容易脱离真实文件证据。
-- 传统文件树只能展示结构，不能解释模块职责和关键流程。
-- 自动编码 Agent 能力很强，但对“先理解项目”这一环节的可视化支持不够集中。
+- Agent 编排：LangGraph `StateGraph`，本地依赖不可用时使用同顺序 fallback graph。
+- 后端服务：Python 3.11+、FastAPI、Pydantic、Uvicorn。
+- LLM 接入：LiteLLM，默认读取百炼 OpenAI-compatible 配置，模型名默认 `glm-5.1`。
+- 前端页面：React 19、Vite 6、TypeScript。
+- 检索 / 索引：确定性 Repo Map、Project Memory、Code Knowledge Index、ripgrep 优先的安全搜索工具，Python 搜索 fallback。
+- 数据存储：本地 JSON state，默认 `.codereader/state.json`，可通过 `CODEREADER_STATE_DIR` 覆盖。
+- 工具调用：运行时 Tool Registry、Tool Executor、Tool Result Processor、Tool Trace Store。
+- 流式输出：当前 API 返回一次性结构化结果；SSE / WebSocket 任务事件流尚未实现。
+- 工程化工具：pytest、`python -m compileall`、Vite build、TypeScript compiler。
 
-## 产品形态
+## 5. 系统架构
 
-第一版采用本地 Web App：
+```mermaid
+flowchart LR
+    User["用户 / 面试官"] --> Web["React/Vite Web 工作台"]
+    Web --> API["FastAPI 后端 API"]
+    API --> Importer["GitHub Importer<br/>只读本地缓存"]
+    API --> Workflow["Agent Workflow"]
+    Workflow --> Planner["Planner / Report Writer"]
+    Workflow --> Tools["Tool Registry<br/>Tool Executor"]
+    Workflow --> Context["Context Manager"]
+    Workflow --> Skills["Skill Router / Skill Registry"]
+    Tools --> RepoMap["Repo Map Builder"]
+    RepoMap --> Index["Code Knowledge Index<br/>Project Memory"]
+    Skills --> Index
+    Context --> Index
+    API --> Ask["Ask Workflow"]
+    Ask --> Skills
+    Ask --> Tools
+    Ask --> ContextPack["Context Pack"]
+    ContextPack --> Answer["Answer Generator<br/>LLM or deterministic fallback"]
+    Answer --> Web
+```
 
-- 后端：FastAPI 本地 API 服务。
-- 前端：Vite + React + TypeScript Web UI。
-- 用户通过浏览器访问 localhost。
-- 后续再评估 Tauri 或 Electron 打包为桌面应用。
+整体架构以本地 FastAPI 为中心：前端只负责导入、展示和追问；后端负责只读扫描、Repo Map 构建、Agent 工作流、Project Memory 持久化和 Ask 问答。确定性代码负责扫描、索引、权限边界和证据构造，LLM 只用于项目解释、总结、分类和自然语言回答组织。
 
-第一阶段不做完整桌面端打包，避免把复杂度放在分发和系统集成上。
+## 6. 核心工作流程
 
-## MVP 功能范围
+### 6.1 项目分析流程
 
-第一版先支持公开 GitHub 上的 Vue/Vite 前端项目和 Java/Spring Boot Web 项目的只读理解闭环：
+```mermaid
+flowchart TD
+    A["输入公开 GitHub 仓库链接"] --> B["导入到本地只读缓存"]
+    B --> C["scan_project 扫描文件树与配置"]
+    C --> D["识别技术栈、入口文件、启动脚本"]
+    D --> E["build_repo_map 构建 Repo Map"]
+    E --> F["Skill Registry 检测 Active Skills"]
+    F --> G["Context Manager 生成上下文快照"]
+    G --> H["Report Writer 生成项目说明书"]
+    H --> I["构建 Project Memory 和 Code Knowledge Index"]
+    I --> J["返回 Report、Evidence、Trace 给前端"]
+```
 
-- 输入公开 GitHub 仓库链接；本地项目路径仅作为内部扫描契约和开发调试能力保留。
-- 扫描文件树。
-- 读取 `package.json`、`pom.xml`、`build.gradle`、`settings.gradle` 等基础配置。
-- 识别 Vue、Vite、TypeScript、Pinia、Vue Router、Axios、Element Plus 等前端依赖。
-- 识别 Java、Maven、Gradle、Spring Boot、常见 Web/API/ORM/测试依赖。
-- 识别启动命令、构建命令和入口文件。
-- 识别 Vue 应用入口、路由、store、请求封装和页面目录。
-- 识别 Java 应用入口、包结构、Controller、Service、Repository、配置文件和测试目录。
-- 自动划分基础模块。
-- 生成结构化 Repo Map。
-- 在 Web UI 中展示技术栈、文件树、模块树、项目概览、模块详情、分析计划、Skill Registry、Context Snapshot、Report 和 Trace Logger。
-- 输出结构化项目解读报告：
-  - 项目地图。
-  - 模块说明。
-  - 关键入口。
-  - 阅读路线。
-  - 调用链候选。
-  - evidence 和不确定点。
-- 报告生成后提供右侧 Ask 边栏：
-  - 支持项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈和符号定位问题意图。
-  - 优先检索 Project Memory、Module Summary、File Summary、API Index、Symbol Index、Flow Index 和 Session Memory。
-  - 上下文不足时通过 Tool Planner、Tool Executor 和运行时 Tool Registry 调用只读工具读取文件、搜索关键词、解析依赖、路由、API 调用、Controller 和 Mapper 候选。
-  - 构造小而准确的 Context Pack，避免每次把全量代码库塞给模型。
-  - 回答包含相关文件、候选实现路径、关键代码说明和参考依据。
+首次分析从 GitHub 导入开始，仓库被 clone 到本地缓存后进入只读扫描流程。扫描结果会被整理为 Repo Map，再由 Skill Registry 根据技术栈激活 `JavaWebSkill`、`SpringBootSkill`、`MyBatisSkill`、`VueSkill`、`RestApiSkill` 等专项 Skill。最终 `/api/agent/run` 返回项目说明书、结构化报告、上下文快照、工具调用记录和 trace，并将 Project Memory 保存到本地 state。
 
-## 非目标范围
+### 6.2 Ask 问答流程
 
-第一阶段明确不做：
+```mermaid
+flowchart TD
+    A["用户在右侧 Ask 边栏提问"] --> B["Query Rewriter<br/>结合 Session Memory 指代消解"]
+    B --> C["Intent Classifier<br/>识别问题类型"]
+    C --> D["Skill Router<br/>选择本轮相关 Skill"]
+    D --> E["Context Retriever<br/>检索 Project Memory / Code Index"]
+    E --> F["Tool Planner<br/>规划只读工具调用"]
+    F --> G["Evidence Collector<br/>执行工具并收集 Code Evidence"]
+    G --> H["Context Builder<br/>构造小而准确的 Context Pack"]
+    H --> I["Answer Composer<br/>LLM 回答或确定性降级"]
+    I --> J["Memory Updater<br/>更新 Session Memory"]
+    J --> K["返回答案、相关文件、实现路径、证据和 trace"]
+```
 
-- 自动大规模修改代码。
-- 自动提交 Git。
-- 云端多用户系统。
-- 插件市场。
-- 完整 IDE 插件。
-- 桌面端打包。
-- 多语言项目全面支持。
-- 复杂代码图谱引擎。
-- 高精度全量 AST 分析。
-- 自动修复 bug。
-- 企业级账号和权限系统。
+Ask 模式不会把问题直接交给模型，也不会重新全量读取代码库。系统先使用 Project Memory、Code Knowledge Index 和 Session Memory 判断问题上下文；当问题涉及具体实现、接口、文件、类、方法或数据来源时，再通过 Tool Planner 调用只读工具补充证据。最终回答会返回相关文件、候选实现链路、关键代码说明、references、tool calls 和 warnings。
 
-## 核心特性
+## 7. 核心设计与实现
 
-- Repo Map：把项目结构、模块、文件角色、依赖、入口和证据保存为结构化数据。
-- Evidence Tracking：回答必须尽量引用已读取文件、路径和片段，避免凭空猜测。
-- Skill Registry：Skill 不是单纯提示词，而是“技术栈名称 + 激活条件 + 扫描函数 + 解析规则 + 索引构建逻辑 + 检索提示 + 回答提示词”的代码理解插件；当前可根据项目技术栈激活 Java Web、Spring Boot、MyBatis、Vue 和 REST API Skill。
-- Skill Router：在现有 Skill Registry 上提供两层轻量路由。项目扫描阶段只激活真实命中的技术栈 Skill，并且只有 ActiveSkill 参与 scan/buildIndex；Ask 阶段再根据问题意图、关键词、Code Knowledge Index 命中和 Session Memory 选择本轮 routed skills。
-- Planner / Context / Report / Trace：让用户看到分析计划、上下文选择、最终报告和执行轨迹。
-- Runtime Tool System：Ask 模式通过独立 Tool Registry、Tool Executor、Result Processor 和 Tool Trace Store 获取代码证据。当前只注册 `permission=read`、`risk_level=safe`、`available_in_modes` 包含 `ask` 的工具，不修改用户代码、不运行项目命令、不执行 Git 操作。
-- Agent Panel：展示分析目标、Planner 计划、Skill Registry、Context Snapshot、Report、Agent Steps 和 Trace Logger。
-- Codebase Map：展示模块树、文件树和后续的模块关系图。
+### 7.1 LangGraph Agent Workflow
 
-## Skill Router
+Ask 模式使用 LangGraph `StateGraph` 表达有状态工作流，核心状态定义在 `AskState` 中，包含 `project_path`、`question`、`project_memory`、`session_memory`、`resolved_query`、`intent_result`、`routed_skills`、`tool_plan`、`code_evidence`、`context_pack`、`answer`、`tool_calls`、`trace_events` 等信息。
 
-Skill 是技术栈级代码理解插件，不是单纯提示词。每个 Skill 包含名称、激活条件、扫描规则、解析函数、索引构建逻辑、query hints、tool plan hints 和 answer prompt。
+节点按固定顺序协作：`QueryRewriter -> IntentClassifier -> SkillRouter -> ContextRetriever -> ToolPlanner -> EvidenceCollector -> ContextBuilder -> AnswerComposer -> MemoryUpdater`。这种状态机设计让每一步中间结果都能进入 API 响应和前端展示，便于调试“为什么调用这个工具”“为什么选这个 Skill”“最终答案依据了哪些证据”。
 
-当前实现是轻量级两层路由：
+首次项目分析的 `/api/agent/run` 目前是一个有边界的只读 LLM tool loop：模型最多调用 `scan_project`、`build_repo_map`、`read_file`、`search_code` 四类工具；当缺少模型配置、模型失败、超预算或输出不合法时，会降级到确定性项目解释，但仍返回完整的 plan、context、report 和 trace。
 
-1. 项目级路由：首次扫描后，`SkillRegistry` 遍历内置 Skill，执行 `detect(repo_map)`，根据 `matched`、`confidence` 和 `reason` 生成 ActiveSkill 列表。只有 ActiveSkill 会执行 `scan()` 并把结果写入 ProjectMemory 的 Code Knowledge Index。
-2. 问题级路由：Ask 模式中，`SkillRouter` 只从 `active_skills` 中选择本轮相关 Skill。路由依据包括 resolved query、intent、关键词、Code Knowledge Index 命中、Session Memory 的关注文件/API/流程。
+### 7.2 Tool Registry 工具注册中心
 
-当前支持的内置 Skill：
+项目中存在两层工具能力：
 
-- `JavaWebSkill`
-- `SpringBootSkill`
-- `MyBatisSkill`
-- `VueSkill`
-- `RestApiSkill`
+- 分析入口的最小 LLM tool loop：`scan_project`、`build_repo_map`、`read_file`、`search_code`。
+- Ask 模式运行时 Tool Registry：`list_files`、`read_file`、`read_file_chunk`、`get_file_metadata`、`search_keyword`、`search_symbol`、`search_api_path`、`search_file_by_name`、`parse_dependencies`、`parse_package_scripts`、`parse_routes`、`parse_api_calls`、`parse_controller`、`parse_mapper`、`query_project_memory`、`query_code_index`、`query_api_index`、`query_flow_index`、`query_symbol_index`。
 
-这套路由当前不做复杂多 Agent 编排，也不做工具级动态路由。Skill 只负责帮助检索上下文、规划只读工具和组织回答；涉及具体实现时仍然必须通过 `read_file`、`search_keyword`、`parse_controller`、`parse_api_calls` 等只读工具读取真实代码证据。后续可以扩展为工具级路由和更复杂的 Skill 编排，但第一版优先保持可解释、可测试、低噪声。
+每个运行时工具都由 `ToolDefinition` 描述名称、类别、权限、可用模式、输入 schema、风险等级、timeout 和 handler。`ToolExecutor` 在执行前校验 mode、permission、Ask 只读规则、输入 schema 和项目路径边界；Ask 模式只允许 `permission=read`、`risk_level=safe` 且 `available_in_modes` 包含 `ask` 的工具。
 
-## 技术栈
+工具结果不会原样塞给模型，而是由 `ToolResultProcessor` 转换为 `CodeEvidence`、`EvidenceRef`、related files、implementation path 和摘要信息。`ToolTraceStore` 记录工具名、输入、调用原因、成功状态、输出摘要、耗时和时间戳，使工具调用过程可观察、可追踪。
 
-后端与 Agent Runtime：
+### 7.3 上下文管理机制
 
-- Python
-- FastAPI
-- Pydantic
-- LangGraph（Ask 模式节点编排；本地依赖不可用时 runtime 使用同顺序 fallback 以便离线测试）
-- LiteLLM（通过百炼 OpenAI-compatible 接口接入 `glm-5.1`，缺少环境变量时自动降级）
-- SQLite（规划中）
-- ripgrep（规划中，通过 subprocess 调用）
-- pytest
+项目通过分层上下文避免“把整个代码库一次性塞进模型”：
 
-前端与可视化：
+- Project Memory：项目定位、描述、项目类型、技术栈、启动命令、入口、构建工具、配置文件、外部依赖、模块和目录摘要。
+- Code Knowledge Index：模块摘要、文件摘要、API Index、Flow Index、Symbol Index、Route Index、Frontend API Call Index、Data Model Index、Mapper Relations。
+- Session Memory：当前话题、关注模块、关注文件、关注接口、关注流程、上一轮问题和回答摘要。
+- Context Pack：本轮 Ask 最终进入 Answer Composer 的小上下文包，包含用户问题、消解后问题、项目上下文、会话上下文和证据片段。
 
-- React
-- Vite
-- TypeScript
-- Tailwind CSS
-- shadcn/ui
-- React Flow
-- Monaco Editor（后续）
-- Markdown Renderer
-- SSE 或 WebSocket
+代码层面，Project Memory 由 Repo Map 和项目说明书派生，并保存到本地 JSON state；Session Memory 在每轮 Ask 后更新，用于连续追问和指代消解。Context Pack 设有字符预算，长文件和搜索结果会先被工具处理器裁剪为证据摘要。
 
-## 基础使用方式草案
+### 7.4 Skill 机制与 Skill 路由
 
-当前仓库已包含本地 API、公开 GitHub 导入、项目扫描、Repo Map Builder、确定性项目解读、最小只读 LLM tool loop、结构化报告字段、Project Memory、Ask 模式 API 和 React/Vite Web 工作台。
+Skill 在这个项目中不是单纯 prompt，而是技术栈级代码理解插件。统一接口包含：
 
-后续 Phase 1 计划：
+- `detect(project)`：判断当前 Repo Map 是否适用。
+- `scan(project)`：生成文件摘要、模块摘要、符号、API、流程、路由、前端 API 调用、数据模型和 Mapper 关系候选。
+- `get_query_hints(query, session)`：为 Ask 检索补充关键词。
+- `plan_tools(query, context)`：为 Tool Planner 建议只读工具调用。
+- `get_answer_prompt()`：提供技术栈相关的回答组织提示。
+
+当前内置 Skill 包括 `JavaWebSkill`、`SpringBootSkill`、`MyBatisSkill`、`VueSkill` 和 `RestApiSkill`。首次分析时，Skill Registry 根据技术栈和文件结构检测 active skills 并构建索引；Ask 时，Skill Router 只从 active skills 中选择与当前问题相关的 Skill，避免每一轮都使用所有规则造成噪声。
+
+### 7.5 Code Knowledge Index / Code Evidence
+
+Code Knowledge Index 用于把一次项目分析沉淀成可复用知识结构。它保存模块职责、文件角色、文件符号、接口路径、Controller 候选、前端调用候选、路由候选、流程候选、实体/Mapper 候选等信息。
+
+Ask 回答时，系统会把索引命中和工具结果转成 Code Evidence。一个 evidence 通常包含来源类型、文件路径、符号名、接口路径、内容摘要、代码片段和相关性原因；文件读取和搜索还会提供行号、摘录和来源工具。这样回答可以明确区分“来自项目记忆的候选信息”和“刚刚通过只读工具读取到的真实代码证据”。
+
+## 8. 项目亮点
+
+- 基于 LangGraph 构建可观察的 Ask 状态工作流，把问题重写、意图识别、Skill 路由、工具规划、证据收集和回答生成拆成可追踪节点。
+- 设计运行时 Tool Registry 和 Tool Executor，统一管理只读工具的注册、参数校验、权限控制、路径边界、timeout 和 trace。
+- 构建 Project Memory + Code Knowledge Index + Session Memory 的分层上下文体系，支持首次报告沉淀和多轮追问复用。
+- 通过 Skill Registry 将 Vue、Spring Boot、Java Web、MyBatis、REST API 的扫描、索引、检索 hint 和回答策略模块化。
+- 将工具结果统一裁剪为 `CodeEvidence` 和 `EvidenceRef`，让回答能绑定文件路径、行号、代码片段、接口候选和工具调用原因。
+- 保留确定性 fallback：即使没有配置 LLM，也能完成扫描、Repo Map、项目说明书、Context Snapshot 和 Trace 展示，保证本地 demo 可运行。
+
+## 9. 快速开始
+
+### 环境要求
+
+- Python 3.11+
+- Node.js 18+ 或 20+
+- Git
+- 可选：`rg` / ripgrep，用于更快的代码搜索；未安装时会使用 Python fallback。
+- 可选：百炼 OpenAI-compatible 环境变量，用于真实 LLM 回答。
+
+### 安装后端依赖
 
 ```bash
-# 启动本地 API
-uvicorn apps.api.main:app --reload
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e ".[dev]"
+```
 
-# 启动 Web UI
+### 配置环境变量
+
+LLM 是可选能力。未配置时系统会使用确定性 fallback。
+
+```bash
+export DASHSCOPE_API_KEY="your-api-key"
+export DASHSCOPE_BASE_URL="https://dashscope.aliyuncs.com/compatible-mode/v1"
+```
+
+可选本地状态目录：
+
+```bash
+export CODEREADER_STATE_DIR="/path/to/local/state"
+export CODEREADER_GITHUB_CACHE_DIR="/path/to/local/repos"
+```
+
+TODO：仓库当前没有 `.env.example`，环境变量示例暂时只在 README 中说明。
+
+### 启动后端
+
+```bash
+PYTHONPATH=src .venv/bin/python -m uvicorn apps.api.main:app --host 127.0.0.1 --port 8000
+```
+
+### 启动前端
+
+```bash
 cd apps/web
 npm install
 npm run dev
 ```
 
-用户在 Web UI 中输入公开 GitHub 仓库链接后，系统会把仓库导入到本地只读缓存，再触发扫描、生成 Repo Map 和项目说明书。报告生成后，右侧 Ask 边栏会调用 `/api/agent/ask` 进行追问，不再把每轮问题都当成整份报告重新生成。
+前端默认访问 `http://127.0.0.1:8000`。如需覆盖：
 
-## 当前开发进度
+```bash
+VITE_API_BASE_URL=http://127.0.0.1:8000 npm run dev
+```
 
-项目当前已经进入“项目理解 + Ask 模式”MVP 阶段：公开 GitHub 导入、只读扫描、Repo Map、结构化报告、Project Memory、Ask 意图分类、只读补证据、Session Memory 和 React/Vite Web UI 已形成闭环。
+### 示例 API 命令
 
-已经具备的能力：
+```bash
+curl -X POST http://127.0.0.1:8000/api/projects/import-github \
+  -H "Content-Type: application/json" \
+  -d '{"github_url":"https://github.com/owner/repo"}'
+```
 
-- 后端提供本地 FastAPI 服务入口。
-- 能读取本地项目路径并执行只读扫描。
-- 能导入公开 GitHub 仓库到本地只读缓存，并复用现有扫描流程分析。
-- 能识别基础文件树、技术栈线索、入口文件、包管理器和构建配置。
-- 已有确定性的 Repo Map 数据结构和 Builder 初版。
-- Web UI 已支持输入公开 GitHub 仓库链接、触发导入和分析、展示技术栈、入口文件、模块卡片、模块详情、分析计划、技能选择、上下文快照、结构化报告、工具调用、trace、证据和提醒。
-- Agent 项目解读支持可选 LLM tool loop；LLM 不可用时仍输出完整 plan、context、report 和 trace。
-- `/api/agent/run` 会返回并保存 `project_memory`；`/api/agent/ask` 会返回 resolved query、intent result、tool plan、Context Pack、code evidence、answer、related files、implementation path、references、tool calls、trace events 和 session memory。
-- Agent 解释已支持运行时 Skill Registry，可按检测到的栈选择 `CodebaseOverviewSkill`、`JavaWebSkill`、`SpringBootSkill`、`MyBatisSkill`、`VueSkill` 和 `RestApiSkill`，并返回激活置信度和原因。
-- Skill 扫描结果会写入 Code Knowledge Index；Ask 模式会使用 Skill query hints 和 tool plan hints 辅助检索，但回答仍必须基于 Project Memory、索引命中和只读工具证据。
-- Repo Map 和 Agent 解释已支持片段级 evidence、已读取文件和工具调用记录。
-- 已有基础测试覆盖扫描、Repo Map、解释器、Ask 模式和 API 行为。
+```bash
+curl -X POST http://127.0.0.1:8000/api/agent/run \
+  -H "Content-Type: application/json" \
+  -d '{"project_path":"/absolute/path/to/repo","question":"请生成项目说明书"}'
+```
 
-尚未完成的能力：
+```bash
+curl -X POST http://127.0.0.1:8000/api/agent/ask \
+  -H "Content-Type: application/json" \
+  -d '{"project_path":"/absolute/path/to/repo","question":"登录接口在哪里实现？"}'
+```
 
-- 真实 LLM provider 已封装为可选模型层，当前默认使用百炼 `glm-5.1`，通过 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 读取系统环境变量。
-- 尚未实现持久化任务队列、SSE 事件流、完整多 Agent 并发和 Reviewer 校验。
-- 尚未实现复杂代码图谱、全量 AST 分析或跨文件调用链追踪。
-- Web UI 仍是 MVP 工作台，模块关系图、事件流和更完整的证据查看还需要继续补齐。
-- 当前重点仍是本地只读理解，不支持自动修改代码或自动提交 Git。
+## 10. 使用示例
 
-## 接下来的开发计划
+### 示例一：生成项目说明书
 
-短期优先级：
+用户输入：
 
-1. 稳定 Ask 模式：继续增强指代消解、8 类意图分类、Context Retriever、Tool Planner 和 Context Pack。
-2. 扩充 Project Memory：提高 API Index、Symbol Index、Flow Index、File Summary 的覆盖面。
-3. 完善 Web UI：让 Ask trace、工具调用、证据和 Session Memory 更清楚。
-4. 强化证据追踪：让每个模块、入口、运行命令和 Ask 回答都能关联到明确文件路径或配置来源。
-5. 扩展专项 skill：继续增强 Spring Boot 分层结构、Vue 页面结构、API 调用链候选、MyBatis 映射候选和认证流程候选。
+```text
+https://github.com/owner/repo
+```
 
-中期计划：
+系统输出摘要：
 
-1. 稳定可选 LLM：继续把模型层限制在总结、分类、模糊理解和结构化解释，确定性扫描、过滤和校验仍由普通代码完成。
-2. 增加 Reviewer 校验：检查回答是否有证据支撑、是否遗漏重要文件、是否出现过度猜测。
-3. 增加 API 流程、登录认证流程、状态管理逻辑等专题分析。
-4. 增强 Codebase Map 可视化：展示模块关系、关键文件、入口和证据链。
-5. 持续补充测试，优先覆盖 Repo Map Schema、扫描规则和 API 契约。
+```text
+已导入公开仓库并生成项目说明书：
+- 项目定位与技术栈
+- 入口文件和启动命令候选
+- 核心模块和目录解释
+- 推荐阅读路径
+- evidence 和不确定点
+```
 
-## Roadmap
+### 示例二：询问某个模块的作用
 
-- Phase 0：项目规划、文档、目录结构、初始 Python 包。
-- Phase 1：本地 API 服务、项目扫描、Vue/Java 技术栈识别。
-- Phase 2：Repo Map Schema 与 Builder。
-- Phase 3：Web UI 原型，展示文件树、模块树、项目概览。
-- Phase 4：可信理解闭环，包含 evidence、只读工具和基础工作台。
-- Phase 5：目标驱动项目理解报告，包含 Planner、Skill Registry、Context Snapshot、Report Writer 和 Trace Logger。
-- Phase 6：Ask 模式，包含 Project Memory、Code Knowledge Index、Session Memory、Query Rewriter、Intent Classifier、Context Retriever、Tool Planner、Evidence Collector、Context Builder、Answer Composer 和 Memory Updater。
-- Phase 7：专项 Skills 与 Reviewer，支持登录流程、API 流程、页面数据来源和 Java 分层结构分析。
-- Phase 8：Codebase Map 可视化增强。
-- Phase 9：TUI / 桌面端体验优化和更多真实项目 demo。
+用户输入：
 
-## 简历导向描述
+```text
+这个项目里的 service 模块主要负责什么？
+```
 
-CodeReader Agent：面向陌生 Java Web / 前后端项目的代码库理解 Agent
+系统输出摘要：
 
-基于 FastAPI + React + LangGraph + LiteLLM 构建本地 Codebase Understanding Agent，支持导入公开 GitHub 仓库、识别 Vue/Vite 与 Java/Spring Boot 技术栈、构建 Repo Map，并生成项目地图、模块说明、关键入口、阅读路线、调用链候选和证据报告。报告会沉淀为 Project Memory，右侧 Ask 模式通过意图分类、上下文检索、只读工具补证据和 Session Memory 支持连续追问，帮助开发者快速接手陌生项目。
-# code-reader-agent
+```text
+意图识别为 module_explanation。
+系统优先检索 Project Memory 中的 Module Summary，并按需搜索 service 相关文件。
+回答会列出相关文件、模块职责、候选入口和证据来源。
+```
+
+### 示例三：询问接口 / 函数调用链
+
+用户输入：
+
+```text
+登录接口从前端页面到后端 Controller 大概经过哪些文件？
+```
+
+系统输出摘要：
+
+```text
+意图识别为 flow_trace / api_lookup。
+系统会路由到 VueSkill、SpringBootSkill 或 RestApiSkill，规划 parse_api_calls、parse_controller、search_api_path 等只读工具。
+输出前端调用文件、后端 Controller 候选、相关方法和不确定点；当前结果是候选链路，不等同完整 AST 调用链。
+```
+
+## 11. 项目结构
+
+```text
+.
+├── apps/
+│   ├── api/                 # FastAPI 本地 API 入口
+│   └── web/                 # React + Vite + TypeScript Web 工作台
+├── docs/                    # 架构、MVP、工具、Skill、Ask、UI 等设计文档
+├── src/code_reader_agent/
+│   ├── github_importer.py   # 公开 GitHub 仓库导入到本地只读缓存
+│   ├── scanner.py           # 文件树、配置、依赖和技术栈扫描
+│   ├── repo_map/            # Repo Map 构建
+│   ├── runtime/             # Agent run、Ask mode、LLM client
+│   ├── tools/               # 只读工具、Tool Registry、Executor、Trace
+│   ├── skills/              # Java/Vue/Spring/MyBatis/REST Skill
+│   ├── memory/              # Project Memory 和 Code Knowledge Index 构建
+│   ├── local_state.py       # 本地 JSON state、项目会话、模型设置、registry
+│   └── models.py            # Pydantic API 和内部数据模型
+├── tests/                   # 扫描、Repo Map、工具、Skill、Ask、API 测试
+└── pyproject.toml           # Python 包和依赖配置
+```
+
+## 12. 后续规划
+
+当前版本优先支持 Java Web、Spring Boot、MyBatis、Vue、Vite 等常见 Java / Vue 前后端项目形态。调用链、接口映射、Mapper 关系目前属于候选级分析，不声明完整 AST 级调用图；系统不自动修改代码、不运行被分析项目命令、不执行 Git 操作。
+
+- 支持更多语言和框架 Skill，例如 React、Next.js、FastAPI、Express。
+- 引入更精细的代码依赖图和 AST 级调用链分析，减少候选链路的不确定性。
+- 增强调用链、登录流程、页面到 API 数据流的可视化展示。
+- 优化长上下文压缩、索引检索排序和证据去重。
+- 增加项目级知识库持久化或增量更新机制，避免每次恢复历史项目都重新扫描。
+- 增强前端交互体验，例如 evidence 抽屉、工具调用详情、代码片段预览和任务事件流。
