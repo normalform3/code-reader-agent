@@ -271,3 +271,23 @@
 选择原因：该方向更贴合陌生项目接手场景，也更容易展示 Planner、Tool Executor、Context Manager、Skill Registry、Analyzer、Report Writer 和 Trace Logger 的价值，同时继续保持只读安全边界。
 
 后续影响：`/api/agent/run` 是 MVP 主入口，必须返回 `task_id`、`analysis_goal`、`analysis_plan`、`selected_skills`、`context_snapshot`、`report` 和 `trace_events`。LLM 不可用时，deterministic fallback 也必须返回完整结构。
+
+## 为什么项目说明书采用 deterministic skeleton + LLM prose override
+
+日期：2026-07-08
+
+状态：Accepted
+
+背景：项目说明书如果完全由确定性 Repo Map 拼装，会让用户感觉“硬编码”；但如果完全交给 LLM 自由生成，又容易新增不存在的模块、入口或目录，破坏 evidence 可信度。
+
+备选方案：
+
+- 继续只用 deterministic 项目说明书。
+- 让 LLM 完整生成项目说明书结构。
+- Repo Map 负责事实骨架，LLM 只覆盖通过校验的说明文字。
+
+最终选择：Repo Map 负责事实骨架，LLM 只覆盖通过校验的说明文字。
+
+选择原因：这种方式既能让说明书的总览、模块职责、入口说明和目录解释更像真实理解结果，又不会允许模型新增未扫描到的结构。所有非法 module id、entrypoint path 或 directory path 都必须进入 warnings，并保留 deterministic fallback。
+
+后续影响：`/api/agent/run` 的 LLM JSON 可以返回 `project_summary` 和 `manual_overrides`；`ProjectManual.generated_by` 必须能区分 LLM 覆盖和 deterministic fallback。后续如果扩大 LLM 覆盖范围，也必须先定义可校验字段和失败降级规则。

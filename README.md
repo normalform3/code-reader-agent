@@ -2,13 +2,13 @@
 
 ## 1. 项目简介
 
-CodeReader Agent 是一个本地运行的代码库理解 Agent。用户输入公开 GitHub 仓库链接后，系统会将仓库导入到本地只读缓存，自动扫描目录结构、识别技术栈、构建 Repo Map，并生成一份可导航、可追踪、可复用的项目说明书。
+CodeReader Agent 是一个本地运行的代码库理解 Agent，面向“快速读懂陌生 GitHub 仓库”场景。
 
-该项目聚焦于解决“如何快速读懂一个陌生仓库”的问题。它先通过 Planner、只读工具调用、上下文管理、Skill 路由和代码知识索引生成项目级理解报告，再进入 Ask 模式，让用户围绕项目说明书继续追问模块职责、接口位置、调用链候选、配置来源和关键代码依据。
-
-在 Ask 模式中，系统不会把问题直接丢给模型回答，而是先检索 Project Memory、Code Knowledge Index 和 Session Memory；当问题涉及具体实现时，再规划只读工具调用，收集文件路径、代码片段、行号和工具 trace，最终生成带证据的回答。这让 CodeReader Agent 更像一个“会读代码、会留下依据的项目导览工作台”，而不是普通聊天式代码问答。
+用户输入公开仓库链接后，系统会将代码导入本地只读缓存，自动扫描项目结构、识别技术栈、构建 Repo Map 和代码知识索引，生成可导航、可追踪的项目说明书；随后进入 Ask 模式，用户可以围绕模块职责、接口位置、调用链、配置来源和关键代码继续追问，系统会结合项目记忆、代码索引和只读工具调用返回带文件路径、代码片段和依据的回答。
 
 ![CodeReader Agent 工作台](docs/assets/codereader-workbench.png)
+
+![Ask 模式展示](docs/assets/codereader-ask-sse-trace.png)
 
 ## 2. 项目背景
 
@@ -38,7 +38,7 @@ CodeReader Agent 将这个过程拆成两个阶段：第一阶段先生成项目
 - 检索 / 索引：确定性 Repo Map、Project Memory、Code Knowledge Index、ripgrep 优先的安全搜索工具，Python 搜索 fallback。
 - 数据存储：本地 JSON state，默认 `.codereader/state.json`，可通过 `CODEREADER_STATE_DIR` 覆盖。
 - 工具调用：运行时 Tool Registry、Tool Executor、Tool Result Processor、Tool Trace Store。
-- 流式输出：当前 API 返回一次性结构化结果；SSE / WebSocket 任务事件流尚未实现。
+- 流式输出：`/api/agent/ask/stream` 通过 SSE 返回 Ask 模式公开执行轨迹和最终结构化结果，前端可展示节点进度、工具计划、工具结果、Context Pack 和回答生成状态。
 - 工程化工具：pytest、`python -m compileall`、Vite build、TypeScript compiler。
 
 ## 5. 系统架构

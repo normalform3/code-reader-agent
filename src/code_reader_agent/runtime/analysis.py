@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from hashlib import sha1
+from typing import Any
 
 from code_reader_agent.models import (
     AgentRunResult,
@@ -47,6 +48,7 @@ def enrich_agent_run_result(
     fallback_result: ProjectInterpretationResult | None,
     project_manual_context: ProjectManual | None = None,
     overview_override: ProjectSummary | None = None,
+    manual_overrides: dict[str, Any] | None = None,
 ) -> AgentRunResult:
     """Attach plan, skills, context, report, and trace to an agent run."""
 
@@ -56,7 +58,13 @@ def enrich_agent_run_result(
     selected_skills = select_skills(repo_map)
     analysis_goal = build_analysis_goal(question)
     analysis_plan = build_analysis_plan(question, repo_map, selected_skills)
-    project_manual = build_project_manual(repo_map, overview_override=overview_override)
+    project_manual, manual_warnings = build_project_manual_with_warnings(
+        repo_map,
+        overview_override=overview_override,
+        manual_overrides=manual_overrides,
+        generated_by=_manual_generated_by(used_llm, fallback_used, overview_override, manual_overrides),
+    )
+    warnings = _dedupe_strings([*warnings, *manual_warnings])
     project_memory = build_project_memory(repo_map, project_manual)
     context_snapshot = build_context_snapshot(
         repo_map,
@@ -233,8 +241,30 @@ def build_context_snapshot(
     )
 
 
-def build_project_manual(repo_map: RepoMap, overview_override: ProjectSummary | None = None) -> ProjectManual:
+def build_project_manual(
+    repo_map: RepoMap,
+    overview_override: ProjectSummary | None = None,
+    manual_overrides: dict[str, Any] | None = None,
+    generated_by: str = "ProjectManualBuilder",
+) -> ProjectManual:
     """Build the stable first-pass project manual from deterministic Repo Map data."""
+
+    manual, _warnings = build_project_manual_with_warnings(
+        repo_map,
+        overview_override=overview_override,
+        manual_overrides=manual_overrides,
+        generated_by=generated_by,
+    )
+    return manual
+
+
+def build_project_manual_with_warnings(
+    repo_map: RepoMap,
+    overview_override: ProjectSummary | None = None,
+    manual_overrides: dict[str, Any] | None = None,
+    generated_by: str = "ProjectManualBuilder",
+) -> tuple[ProjectManual, list[str]]:
+    """Build the project manual and safely apply LLM prose overrides."""
 
     directory_depth = {entry.path: entry.depth for entry in repo_map.file_tree if entry.kind == "directory"}
     evidence = [
@@ -255,7 +285,7 @@ def build_project_manual(repo_map: RepoMap, overview_override: ProjectSummary | 
             "调用链仍为候选级结果，后续追问可继续通过 read_file/search_code 补充上下文。",
         ]
     )
-    return ProjectManual(
+    manual = ProjectManual(
         title=f"{repo_map.project_name} 项目说明书",
         overview=overview_override or repo_map.project_summary,
         technology_stack=repo_map.stack_explanations[:12],
@@ -292,7 +322,12 @@ def build_project_manual(repo_map: RepoMap, overview_override: ProjectSummary | 
         ],
         evidence=evidence,
         uncertainties=uncertainties,
+        generated_by=generated_by,
     )
+    override_warnings = _apply_manual_overrides(manual, manual_overrides)
+    if override_warnings:
+        manual.uncertainties = _dedupe_strings([*manual.uncertainties, *override_warnings])
+    return manual, override_warnings
 
 
 def build_project_report(
@@ -437,6 +472,100 @@ def _call_chain_candidates(repo_map: RepoMap) -> list[str]:
     if not candidates:
         candidates.append("未找到明确调用链候选；需要后续通过 search_code/read_file 继续收集证据。")
     return candidates
+
+
+def _apply_manual_overrides(manual: ProjectManual, raw_overrides: dict[str, Any] | None) -> list[str]:
+    """Apply validated LLM prose overrides without changing manual structure."""
+
+    if raw_overrides is None:
+        return []
+    if not isinstance(raw_overrides, dict):
+        return ["LLM manual_overrides was invalid; deterministic manual prose was used."]
+
+    warnings: list[str] = []
+    modules_by_id = {module.id: module for module in manual.modules}
+    entrypoints_by_path = {entrypoint.path: entrypoint for entrypoint in manual.entrypoints}
+    directories_by_path = {directory.path: directory for directory in manual.key_directories}
+
+    for item in _override_items(raw_overrides.get("modules")):
+        module_id = _override_key(item, "id", "module_id")
+        responsibility = _clean_override_text(item.get("responsibility"))
+        if not module_id or not responsibility:
+            warnings.append("LLM module override was missing id or responsibility; it was ignored.")
+            continue
+        module = modules_by_id.get(module_id)
+        if module is None:
+            warnings.append(f"LLM module override referenced unknown module id: {module_id}.")
+            continue
+        module.responsibility = responsibility
+
+    for item in _override_items(raw_overrides.get("entrypoints")):
+        path = _override_key(item, "path")
+        reason = _clean_override_text(item.get("reason"))
+        if not path or not reason:
+            warnings.append("LLM entrypoint override was missing path or reason; it was ignored.")
+            continue
+        entrypoint = entrypoints_by_path.get(path)
+        if entrypoint is None:
+            warnings.append(f"LLM entrypoint override referenced unknown path: {path}.")
+            continue
+        entrypoint.reason = reason
+
+    for item in _override_items(raw_overrides.get("directories")):
+        path = _override_key(item, "path")
+        role = _clean_override_text(item.get("role"))
+        reason = _clean_override_text(item.get("reason"))
+        if not path or (not role and not reason):
+            warnings.append("LLM directory override was missing path, role, or reason; it was ignored.")
+            continue
+        directory = directories_by_path.get(path)
+        if directory is None:
+            warnings.append(f"LLM directory override referenced unknown path: {path}.")
+            continue
+        if role:
+            directory.role = role
+        if reason:
+            directory.reason = reason
+
+    if warnings:
+        return _dedupe_strings(warnings)
+    return []
+
+
+def _override_items(value: Any) -> list[dict[str, Any]]:
+    if isinstance(value, list):
+        return [item for item in value if isinstance(item, dict)]
+    if isinstance(value, dict):
+        return [dict({"id": key}, **item) for key, item in value.items() if isinstance(item, dict)]
+    return []
+
+
+def _override_key(item: dict[str, Any], *keys: str) -> str:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _clean_override_text(value: Any, max_chars: int = 600) -> str:
+    if not isinstance(value, str):
+        return ""
+    cleaned = " ".join(value.split())
+    return cleaned[:max_chars].strip()
+
+
+def _manual_generated_by(
+    used_llm: bool,
+    fallback_used: bool,
+    overview_override: ProjectSummary | None,
+    manual_overrides: dict[str, Any] | None,
+) -> str:
+    if fallback_used or not used_llm:
+        return "ProjectManualBuilder (deterministic fallback)"
+    if overview_override or manual_overrides:
+        return "LLM Agent + ProjectManualBuilder"
+    return "LLM Agent (deterministic manual skeleton)"
 
 
 def _entrypoint_reason(kind: str) -> str:

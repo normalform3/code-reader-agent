@@ -50,6 +50,11 @@ When you have enough evidence, respond with a JSON object only:
     "confidence": 0.7,
     "evidence": ["README.md", "package.json"]
   },
+  "manual_overrides": {
+    "modules": [{"id": "controller", "responsibility": "基于证据改写的模块职责。"}],
+    "entrypoints": [{"path": "src/main.ts", "reason": "基于证据改写的入口说明。"}],
+    "directories": [{"path": "src", "role": "前端源码目录", "reason": "基于证据改写的目录解释。"}]
+  },
   "evidence": [{"path": "...", "reason": "...", "source": "...", "start_line": 1, "end_line": 3, "excerpt": "..."}],
   "read_files": ["..."],
   "warnings": ["..."],
@@ -239,8 +244,11 @@ def run_agent_loop(
         final_warnings = _dedupe_strings([*warnings, *_string_list(parsed.get("warnings"))])
         final_questions = _string_list(parsed.get("suggested_questions")) or fallback.suggested_questions
         overview_override = _parse_project_summary(parsed.get("project_summary"))
+        manual_overrides = _parse_manual_overrides(parsed.get("manual_overrides"))
         if parsed.get("project_summary") is not None and overview_override is None:
             final_warnings.append("LLM project_summary was invalid; deterministic overview was used.")
+        if parsed.get("manual_overrides") is not None and manual_overrides is None:
+            final_warnings.append("LLM manual_overrides was invalid; deterministic manual prose was used.")
         agent_steps.append(
             AgentStep(
                 index=len(agent_steps) + 1,
@@ -266,6 +274,7 @@ def run_agent_loop(
             fallback_result=None,
             project_manual_context=project_manual_context,
             overview_override=overview_override,
+            manual_overrides=manual_overrides,
         )
 
     return _fallback_result(
@@ -613,6 +622,24 @@ def _parse_project_summary(raw_summary: Any) -> ProjectSummary | None:
         return ProjectSummary.model_validate(raw_summary)
     except ValidationError:
         return None
+
+
+def _parse_manual_overrides(raw_overrides: Any) -> dict[str, Any] | None:
+    if not isinstance(raw_overrides, dict):
+        return None
+    allowed_keys = {"modules", "entrypoints", "directories"}
+    parsed = {key: value for key, value in raw_overrides.items() if key in allowed_keys}
+    if not parsed:
+        return {}
+    for key, value in parsed.items():
+        if value is None:
+            continue
+        if isinstance(value, list) and all(isinstance(item, dict) for item in value):
+            continue
+        if isinstance(value, dict) and all(isinstance(item, dict) for item in value.values()):
+            continue
+        return None
+    return parsed
 
 
 def _budget_step(index: int, warning: str) -> AgentStep:

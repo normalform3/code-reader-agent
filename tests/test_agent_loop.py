@@ -314,6 +314,94 @@ def test_agent_loop_selects_spring_boot_skill_and_report_for_java(tmp_path: Path
     assert any(entry.kind == "java_app_entry" for entry in result.project_manual.entrypoints)
 
 
+def test_agent_loop_applies_valid_llm_manual_overrides(tmp_path: Path) -> None:
+    write_minimal_java_project(tmp_path)
+    app_path = "src/main/java/com/example/demo/DemoApplication.java"
+    client = FakeLLMClient(
+        [
+            final_response(
+                {
+                    "answer": "这是一个 Spring Boot 服务。",
+                    "skill": "project_overview_skill",
+                    "project_summary": {
+                        "one_liner": "LLM 判断这是一个用户服务后端。",
+                        "audience": "面向后端维护者。",
+                        "problem": "提供用户相关接口和服务分层。",
+                        "confidence": 0.86,
+                        "evidence": ["pom.xml", app_path],
+                    },
+                    "manual_overrides": {
+                        "modules": [
+                            {
+                                "id": "controller",
+                                "responsibility": "接收 HTTP 请求并把用户相关操作交给服务层处理。",
+                            }
+                        ],
+                        "entrypoints": [
+                            {
+                                "path": app_path,
+                                "reason": "Spring Boot 启动类，负责加载自动配置并启动后端应用。",
+                            }
+                        ],
+                        "directories": [
+                            {
+                                "path": "src",
+                                "role": "后端源码与资源根目录",
+                                "reason": "包含 Java 源码、resources 配置和项目主实现。",
+                            }
+                        ],
+                    },
+                    "evidence": [],
+                    "read_files": [],
+                    "warnings": [],
+                    "suggested_questions": [],
+                }
+            )
+        ]
+    )
+
+    result = run_agent_loop(str(tmp_path), "生成项目说明书", llm_client=client)
+
+    assert result.project_manual.generated_by == "LLM Agent + ProjectManualBuilder"
+    assert result.project_manual.overview
+    assert result.project_manual.overview.one_liner == "LLM 判断这是一个用户服务后端。"
+    assert any(module.id == "controller" and "HTTP 请求" in module.responsibility for module in result.project_manual.modules)
+    assert any(entry.path == app_path and "Spring Boot 启动类" in entry.reason for entry in result.project_manual.entrypoints)
+    assert any(directory.path == "src" and directory.role == "后端源码与资源根目录" for directory in result.project_manual.key_directories)
+
+
+def test_agent_loop_ignores_invalid_llm_manual_overrides(tmp_path: Path) -> None:
+    write_minimal_java_project(tmp_path)
+    client = FakeLLMClient(
+        [
+            final_response(
+                {
+                    "answer": "这是一个 Spring Boot 服务。",
+                    "skill": "project_overview_skill",
+                    "manual_overrides": {
+                        "modules": [{"id": "missing-module", "responsibility": "不应该出现。"}],
+                        "entrypoints": [{"path": "missing/File.java", "reason": "不应该出现。"}],
+                        "directories": [{"path": "missing", "role": "不应该出现。"}],
+                    },
+                    "evidence": [],
+                    "read_files": [],
+                    "warnings": [],
+                    "suggested_questions": [],
+                }
+            )
+        ]
+    )
+
+    result = run_agent_loop(str(tmp_path), "生成项目说明书", llm_client=client)
+
+    assert any("unknown module id: missing-module" in warning for warning in result.warnings)
+    assert any("unknown path: missing/File.java" in warning for warning in result.warnings)
+    assert any("unknown path: missing" in warning for warning in result.warnings)
+    assert all(module.responsibility != "不应该出现。" for module in result.project_manual.modules)
+    assert all(entry.reason != "不应该出现。" for entry in result.project_manual.entrypoints)
+    assert all(directory.role != "不应该出现。" for directory in result.project_manual.key_directories)
+
+
 def test_agent_loop_reuses_project_manual_context_for_followup(tmp_path: Path) -> None:
     write_minimal_vue_project(tmp_path)
     first_result = run_agent_loop(str(tmp_path), "生成项目说明书", llm_client=FakeLLMClient(error=RuntimeError("offline")))

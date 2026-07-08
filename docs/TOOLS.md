@@ -380,10 +380,11 @@ Phase 1 最小实现会返回已存在的候选入口文件及其类型，为后
 当前 MVP 实现：
 
 - 由 `code_reader_agent.runtime.analysis.build_project_report` 为 `/api/agent/run` 生成 `report`。
-- 由 `code_reader_agent.runtime.analysis.build_project_manual` 为 `/api/agent/run` 生成 `project_manual`；其中 `overview` 可使用 LLM 返回并通过校验的 `project_summary` 覆盖。
+- 由 `code_reader_agent.runtime.analysis.build_project_manual` 为 `/api/agent/run` 生成 `project_manual`；其中 `overview` 可使用 LLM 返回并通过校验的 `project_summary` 覆盖，模块职责、入口说明和关键目录说明可使用通过校验的 `manual_overrides` 覆盖。
+- `manual_overrides` 只能改写已有 Repo Map 骨架中的自然语言字段，不能新增不存在的模块、入口或目录；非法引用必须进入 warnings 并保留 deterministic 内容。
 - 报告基于 Repo Map、只读工具调用、evidence、LLM/fallback 输出和 warnings。
 - 即使 LLM 不可用，也必须返回结构化 `ProjectManual` 和 `ProjectReport`。
-- 后续追问通过 `/api/agent/ask` 检索 Project Memory 和 Session Memory；缺少细节时仍通过只读工具补证据。
+- 后续追问通过 `/api/agent/ask` 或 `/api/agent/ask/stream` 检索 Project Memory 和 Session Memory；缺少细节时仍通过只读工具补证据。
 
 ## 第二版工具规划
 
@@ -427,7 +428,7 @@ Java 项目优先从 Controller mapping、Service 调用、Repository/Mapper 调
 
 `reason` 用于说明为什么调用该工具，例如“用户询问指定文件，需要读取真实代码片段”或“接口问题需要提取前端调用候选”。这些记录需要展示在 Evidence Panel 或 Ask Trace 中。
 
-当前 MVP 中，`/api/agent/run` 会返回紧凑版 `tool_calls` 和 `trace_events`，用于前端展示 `scan_project`、`build_repo_map`、`read_file`、`search_code`、Planner 计划、Context Snapshot 和 Report Writer 输出。`/api/agent/ask` 会额外返回 `tool_plan`、`code_evidence` 和 `context_pack`，用于展示为什么调用只读工具以及哪些证据进入回答上下文。
+当前 MVP 中，`/api/agent/run` 会返回紧凑版 `tool_calls` 和 `trace_events`，用于前端展示 `scan_project`、`build_repo_map`、`read_file`、`search_code`、Planner 计划、Context Snapshot 和 Report Writer 输出。`/api/agent/ask` 会额外返回 `tool_plan`、`code_evidence` 和 `context_pack`，用于展示为什么调用只读工具以及哪些证据进入回答上下文。`/api/agent/ask/stream` 会把同一套公开 trace 以 SSE 事件输出，包括 `trace`、`tool_plan`、`tool_result`、`answer`、`final` 和 `error`；这些事件只展示用户可见的执行摘要，不输出模型隐藏推理链。
 
 ## Phase 5.0：LLM 可调用工具白名单
 

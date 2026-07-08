@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from code_reader_agent.github_importer import GitHubCloneError, GitHubImportError, import_github_repository
@@ -50,7 +52,7 @@ from code_reader_agent.models import (
     RegistryTool,
     RepoMap,
 )
-from code_reader_agent.runtime.ask_mode import run_ask_mode
+from code_reader_agent.runtime.ask_mode import run_ask_mode, run_ask_mode_events
 from code_reader_agent.repo_map.builder import build_repo_map
 from code_reader_agent.runtime.agent_loop import run_agent_loop
 from code_reader_agent.runtime.llm_client import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL_ENV, LLMConfigurationError, LiteLLMClient
@@ -334,11 +336,39 @@ def ask_agent_api(request: AskModeRequest) -> AskModeResult:
         raise _state_http_error(exc) from exc
 
 
+@app.post("/api/agent/ask/stream")
+def ask_agent_stream_api(request: AskModeRequest) -> StreamingResponse:
+    """Stream report-side Ask progress events and final result as SSE."""
+
+    def event_stream():
+        try:
+            for event in run_ask_mode_events(
+                request.project_path,
+                request.question,
+                session_memory=request.session_memory,
+            ):
+                yield _sse_event(event["type"], event)
+        except (ProjectScanError, LocalStateError) as exc:
+            yield _sse_event("error", {"type": "error", "error": str(exc)})
+        except Exception as exc:
+            yield _sse_event("error", {"type": "error", "error": f"Ask stream failed: {exc}"})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 def _state_http_error(exc: LocalStateError) -> HTTPException:
     message = str(exc)
     if "not found" in message:
         return HTTPException(status_code=404, detail=message)
     return HTTPException(status_code=500, detail=message)
+
+
+def _sse_event(event: str, payload: dict[str, object]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def _model_settings_status() -> ModelSettingsStatus:

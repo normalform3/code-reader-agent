@@ -409,6 +409,20 @@ type AskModeResult = {
   llm_model: string | null;
 };
 
+type AskModeRequest = {
+  project_path: string;
+  question: string;
+  session_memory: SessionMemory | null;
+};
+
+type AskStreamEvent =
+  | { type: "trace"; node?: string; event?: TraceEvent }
+  | { type: "tool_plan"; node?: string; event?: ToolPlan }
+  | { type: "tool_result"; node?: string; event?: AskModeResult["tool_calls"][number] }
+  | { type: "answer"; node?: string; event?: { answer?: string }; answer?: string }
+  | { type: "final"; event?: AskModeResult }
+  | { type: "error"; error?: string };
+
 type ModelSettingsStatus = {
   provider: "bailian";
   model: string;
@@ -478,6 +492,8 @@ type AskMessage = {
   role: "user" | "assistant";
   body: string;
   meta?: string;
+  streaming?: boolean;
+  traceEvents?: TraceEvent[];
 };
 type FileTreeNode = FileTreeEntry & {
   children: FileTreeNode[];
@@ -491,6 +507,7 @@ function App() {
   const [sessions, setSessions] = useState<ProjectSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [askExpanded, setAskExpanded] = useState(false);
   const [sidebarView, setSidebarView] = useState<SidebarView>("history");
   const [projectPath, setProjectPath] = useState("");
   const [githubUrl, setGithubUrl] = useState("");
@@ -659,9 +676,13 @@ function App() {
     if (!projectPath.trim()) {
       return;
     }
+    const askedQuestion = question.trim();
+    if (!askedQuestion) {
+      return;
+    }
     setStatus("loading");
     setError(null);
-    const askedQuestion = question.trim();
+    const assistantMessageId = `${Date.now()}-assistant-stream`;
     setAskMessages((current) => [
       ...current,
       {
@@ -669,29 +690,87 @@ function App() {
         role: "user",
         body: askedQuestion,
       },
+      {
+        id: assistantMessageId,
+        role: "assistant",
+        body: "Agent 正在分析问题并收集证据...",
+        meta: "Ask · streaming",
+        streaming: true,
+        traceEvents: [],
+      },
     ]);
     try {
-      const result = await postJson<AskModeResult>("/api/agent/ask", {
-        project_path: projectPath.trim(),
-        question: askedQuestion,
-        session_memory: askSessionMemory,
-      });
+      const result = await postAskStream(
+        {
+          project_path: projectPath.trim(),
+          question: askedQuestion,
+          session_memory: askSessionMemory,
+        },
+        (event) => {
+          setAskMessages((current) =>
+            current.map((message) => {
+              if (message.id !== assistantMessageId) {
+                return message;
+              }
+              if (event.type === "trace" && event.event) {
+                return {
+                  ...message,
+                  body: message.body || "Agent 正在分析问题并收集证据...",
+                  traceEvents: [...(message.traceEvents ?? []), event.event],
+                };
+              }
+              if (event.type === "tool_plan") {
+                return {
+                  ...message,
+                  body: "Agent 已完成工具计划，正在读取只读证据...",
+                };
+              }
+              if (event.type === "tool_result" && event.event) {
+                const traceEvent: TraceEvent = {
+                  index: (message.traceEvents?.length ?? 0) + 1,
+                  stage: "Tool Executor",
+                  title: event.event.tool_name,
+                  summary: event.event.output_summary,
+                  status: event.event.status,
+                  tool_name: event.event.tool_name,
+                };
+                return {
+                  ...message,
+                  body: "Agent 正在整理工具结果和上下文...",
+                  traceEvents: [...(message.traceEvents ?? []), traceEvent],
+                };
+              }
+              if (event.type === "answer" && event.answer) {
+                return {
+                  ...message,
+                  body: event.answer,
+                };
+              }
+              return message;
+            }),
+          );
+        },
+      );
       setAskResult(result);
       setAskSessionMemory(result.session_memory);
-      setAskMessages((current) => [
-        ...current,
-        {
-          id: `${Date.now()}-assistant`,
-          role: "assistant",
-          body: askResultText(result),
-          meta: `Ask · ${intentLabel(result.intent)} · ${result.used_llm ? result.llm_model ?? "LLM" : "规则降级"}`,
-        },
-      ]);
+      setAskMessages((current) =>
+        current.map((message) =>
+          message.id === assistantMessageId
+            ? {
+                ...message,
+                body: askResultText(result),
+                meta: `Ask · ${intentLabel(result.intent)} · ${result.used_llm ? result.llm_model ?? "LLM" : "规则降级"}`,
+                streaming: false,
+                traceEvents: result.trace_events,
+              }
+            : message,
+        ),
+      );
       setStatus("ready");
       if (activeSessionId) {
         await patchJson<ProjectSession>(`/api/projects/history/${activeSessionId}`, {
           status: "ready",
-          last_question: question,
+          last_question: askedQuestion,
           last_error: null,
         });
         await refreshSessions();
@@ -699,6 +778,18 @@ function App() {
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "提问失败，请检查本地 API 是否已启动。";
       setError(message);
+      setAskMessages((current) =>
+        current.map((item) =>
+          item.id === assistantMessageId
+            ? {
+                ...item,
+                body: message,
+                meta: "Ask · error",
+                streaming: false,
+              }
+            : item,
+        ),
+      );
       setStatus("error");
       if (activeSessionId) {
         await patchJson<ProjectSession>(`/api/projects/history/${activeSessionId}`, {
@@ -732,6 +823,7 @@ function App() {
 
       <ProjectWorkspace
         activeSession={activeSession}
+        askExpanded={askExpanded}
         askMessages={askMessages}
         askResult={askResult}
         error={error}
@@ -740,6 +832,7 @@ function App() {
         onAsk={handleAsk}
         onSelectModule={setSelectedModuleId}
         onSetQuestion={setQuestion}
+        onToggleAskExpanded={() => setAskExpanded((current) => !current)}
         projectManual={projectManual}
         question={question}
         repoMap={repoMap}
@@ -946,6 +1039,7 @@ function SidebarFileNode({
 
 function ProjectWorkspace({
   activeSession,
+  askExpanded,
   askMessages,
   askResult,
   error,
@@ -954,6 +1048,7 @@ function ProjectWorkspace({
   onAsk,
   onSelectModule,
   onSetQuestion,
+  onToggleAskExpanded,
   projectManual,
   question,
   repoMap,
@@ -961,6 +1056,7 @@ function ProjectWorkspace({
   status,
 }: {
   activeSession: ProjectSession | null;
+  askExpanded: boolean;
   askMessages: AskMessage[];
   askResult: AskModeResult | null;
   error: string | null;
@@ -969,6 +1065,7 @@ function ProjectWorkspace({
   onAsk: () => void;
   onSelectModule: (moduleId: string) => void;
   onSetQuestion: (question: string) => void;
+  onToggleAskExpanded: () => void;
   projectManual: ProjectManual | null;
   question: string;
   repoMap: RepoMap | null;
@@ -1004,8 +1101,8 @@ function ProjectWorkspace({
   const manualOverview = projectManual?.overview ?? repoMap?.project_summary ?? null;
 
   return (
-    <section className="workspace-shell">
-      <section className="map-panel">
+    <section className={askExpanded ? "workspace-shell ask-expanded" : "workspace-shell"}>
+      {!askExpanded ? <section className="map-panel">
         <header className="workspace-header">
           <div>
             <p className="kicker">Project Session</p>
@@ -1103,7 +1200,17 @@ function ProjectWorkspace({
             <EmptyState title="模块详情" body="模块证据和关键文件会显示在这里。" />
           )}
         </div>
-      </section>
+      </section> : null}
+
+      <button
+        aria-label={askExpanded ? "显示项目说明书" : "隐藏项目说明书并展开 Ask"}
+        className="ask-expand-toggle"
+        onClick={onToggleAskExpanded}
+        title={askExpanded ? "显示项目说明书" : "展开 Ask"}
+        type="button"
+      >
+        {askExpanded ? ">" : "<"}
+      </button>
 
       <AgentPanel
         askMessages={askMessages}
@@ -1164,6 +1271,17 @@ function AgentPanel({
               <article className={`ask-message ${message.role}`} key={message.id}>
                 <span>{message.role === "user" ? "你" : message.meta ?? "Agent"}</span>
                 <p>{message.body}</p>
+                {message.traceEvents?.length ? (
+                  <div className="ask-message-trace">
+                    {message.traceEvents.slice(-6).map((event) => (
+                      <div className="ask-message-trace-row" data-status={event.status} key={`${message.id}-${event.index}-${event.stage}-${event.title}`}>
+                        <strong>{event.stage}</strong>
+                        <small>{event.title}</small>
+                      </div>
+                    ))}
+                    {message.streaming ? <em>持续接收 Agent 进度...</em> : null}
+                  </div>
+                ) : null}
               </article>
             ))
           ) : (
@@ -1856,6 +1974,92 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
     body: JSON.stringify(body),
   });
   return parseJsonResponse<T>(response);
+}
+
+async function postAskStream(body: AskModeRequest, onEvent: (event: AskStreamEvent) => void): Promise<AskModeResult> {
+  const response = await fetch(`${API_BASE_URL}/api/agent/ask/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.body) {
+    return parseJsonResponse<AskModeResult>(response);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResult: AskModeResult | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (value) {
+      buffer += decoder.decode(value, { stream: !done });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        const event = parseSseFrame(frame);
+        if (!event) {
+          continue;
+        }
+        const normalized = normalizeAskStreamEvent(event);
+        if (normalized.type === "error") {
+          throw new Error(normalized.error ?? "Ask stream failed.");
+        }
+        if (normalized.type === "final" && normalized.event) {
+          finalResult = normalized.event;
+        }
+        onEvent(normalized);
+      }
+    }
+    if (done) {
+      break;
+    }
+  }
+
+  if (buffer.trim()) {
+    const event = parseSseFrame(buffer);
+    if (event) {
+      const normalized = normalizeAskStreamEvent(event);
+      if (normalized.type === "error") {
+        throw new Error(normalized.error ?? "Ask stream failed.");
+      }
+      if (normalized.type === "final" && normalized.event) {
+        finalResult = normalized.event;
+      }
+      onEvent(normalized);
+    }
+  }
+
+  if (!finalResult) {
+    throw new Error("Ask stream ended before final result.");
+  }
+  return finalResult;
+}
+
+function parseSseFrame(frame: string): AskStreamEvent | null {
+  const dataLines = frame
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart());
+  if (!dataLines.length) {
+    return null;
+  }
+  try {
+    return JSON.parse(dataLines.join("\n")) as AskStreamEvent;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeAskStreamEvent(event: AskStreamEvent): AskStreamEvent {
+  if (event.type === "answer" && !event.answer && event.event?.answer) {
+    return { ...event, answer: event.event.answer };
+  }
+  return event;
 }
 
 async function patchJson<T>(path: string, body: unknown): Promise<T> {

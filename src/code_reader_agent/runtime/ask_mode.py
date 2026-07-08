@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from typing import Any, NotRequired, TypedDict
 
 try:
@@ -149,43 +150,85 @@ def run_ask_mode(
 ) -> AskModeResult:
     """Run the structured Ask workflow for a project question."""
 
+    state = _initial_ask_state(project_path, question, session_memory)
+    state = _run_ask_nodes(state)
+    return _ask_result_from_state(state)
+
+
+def run_ask_mode_events(
+    project_path: str,
+    question: str,
+    session_memory: SessionMemory | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Run Ask mode and yield public progress events plus the final result."""
+
+    state = _initial_ask_state(project_path, question, session_memory)
+    for node_name, node in _ask_node_sequence():
+        before_trace_count = len(state.get("trace_events", []))
+        before_tool_count = len(state.get("tool_calls", []))
+        state = node(state)
+        for trace in state.get("trace_events", [])[before_trace_count:]:
+            yield {"type": "trace", "node": node_name, "event": trace.model_dump()}
+        if node_name == "ToolPlanner" and state.get("tool_plan"):
+            yield {"type": "tool_plan", "node": node_name, "event": state["tool_plan"].model_dump()}
+        if node_name == "EvidenceCollector":
+            for call in state.get("tool_calls", [])[before_tool_count:]:
+                yield {"type": "tool_result", "node": node_name, "event": call.model_dump()}
+        if node_name == "AnswerComposer":
+            yield {"type": "answer", "node": node_name, "event": {"answer": state.get("answer", "")}}
+    yield {"type": "final", "event": _ask_result_from_state(state).model_dump()}
+
+
+def _initial_ask_state(
+    project_path: str,
+    question: str,
+    session_memory: SessionMemory | None = None,
+) -> AskState:
     repo_map = build_repo_map(scan_project(project_path))
     project_memory = get_project_memory(project_path)
     if project_memory is None or project_memory.knowledge_index_version != KNOWLEDGE_INDEX_VERSION:
         project_memory = save_project_memory(build_project_memory(repo_map))
     active_session_memory = session_memory or get_session_memory(project_path) or SessionMemory(project_id=project_id_for_path(project_path))
 
-    graph = _build_graph()
-    state = graph.invoke(
-        {
-            "project_path": project_path,
-            "question": question,
-            "project_memory": project_memory,
-            "session_memory": active_session_memory,
-            "retrieved_context": [],
-            "relevant_modules": [],
-            "relevant_files": [],
-            "relevant_apis": [],
-            "relevant_flows": [],
-            "query_hints": [],
-            "routed_skills": [],
-            "related_files": [],
-            "related_apis": [],
-            "related_flows": [],
-            "implementation_path": [],
-            "references": [],
-            "tool_calls": [],
-            "code_evidence": [],
-            "skill_answer_prompts": [],
-            "key_code_notes": [],
-            "warnings": [],
-            "trace_events": [],
-        }
-    )
+    return {
+        "project_path": project_path,
+        "question": question,
+        "project_memory": project_memory,
+        "session_memory": active_session_memory,
+        "retrieved_context": [],
+        "relevant_modules": [],
+        "relevant_files": [],
+        "relevant_apis": [],
+        "relevant_flows": [],
+        "query_hints": [],
+        "routed_skills": [],
+        "related_files": [],
+        "related_apis": [],
+        "related_flows": [],
+        "implementation_path": [],
+        "references": [],
+        "tool_calls": [],
+        "code_evidence": [],
+        "skill_answer_prompts": [],
+        "key_code_notes": [],
+        "warnings": [],
+        "trace_events": [],
+    }
+
+
+def _run_ask_nodes(state: AskState) -> AskState:
+    next_state = state
+    for _node_name, node in _ask_node_sequence():
+        next_state = node(next_state)
+    return next_state
+
+
+def _ask_result_from_state(state: AskState) -> AskModeResult:
+    project_memory = state["project_memory"]
     return AskModeResult(
         project_id=project_memory.project_id,
         project_name=project_memory.project_name,
-        question=question,
+        question=state["question"],
         intent=state["intent"],
         answer=state.get("answer", ""),
         resolved_query=state.get("resolved_query"),
@@ -201,7 +244,7 @@ def run_ask_mode(
         references=_dedupe_evidence(state.get("references", [])),
         tool_calls=state.get("tool_calls", []),
         trace_events=state.get("trace_events", []),
-        session_memory=state.get("session_memory", active_session_memory),
+        session_memory=state.get("session_memory", SessionMemory(project_id=project_memory.project_id)),
         warnings=_dedupe_strings(state.get("warnings", [])),
         used_llm=state.get("used_llm", False),
         fallback_used=state.get("fallback_used", False),
@@ -717,6 +760,20 @@ def _memory_updater(state: AskState) -> AskState:
         "session_memory": updated,
         "trace_events": _append_trace(state, "Memory Updater", "Session Memory", f"Stored {len(updated.turns)} Ask turns."),
     }
+
+
+def _ask_node_sequence() -> tuple[tuple[str, Any], ...]:
+    return (
+        ("QueryRewriter", _query_rewriter),
+        ("IntentClassifier", _intent_classifier),
+        ("SkillRouter", _skill_router),
+        ("ContextRetriever", _context_retriever),
+        ("ToolPlanner", _tool_planner),
+        ("EvidenceCollector", _evidence_collector),
+        ("ContextBuilder", _context_builder),
+        ("AnswerComposer", _answer_composer),
+        ("MemoryUpdater", _memory_updater),
+    )
 
 
 def _compose_answer(intent: AskIntent, pack: ContextPack, memory: ProjectMemory) -> str:

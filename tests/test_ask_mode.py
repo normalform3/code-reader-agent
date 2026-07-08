@@ -7,7 +7,7 @@ from code_reader_agent.memory.project_memory import build_project_memory
 from code_reader_agent.models import ProjectMemory, ProjectMemoryOverview, SessionMemory, SessionMemoryTurn
 from code_reader_agent.runtime.llm_client import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL_ENV
 from code_reader_agent.repo_map.builder import build_repo_map
-from code_reader_agent.runtime.ask_mode import classify_ask_intent, run_ask_mode
+from code_reader_agent.runtime.ask_mode import classify_ask_intent, run_ask_mode, run_ask_mode_events
 from code_reader_agent.scanner import scan_project
 from tests.test_scanner import write_minimal_java_project, write_minimal_vue_project
 
@@ -201,3 +201,21 @@ def test_ask_mode_uses_llm_answer_when_configured(tmp_path: Path, monkeypatch: o
     assert result.fallback_used is False
     assert result.llm_model == "glm-test"
     assert result.answer == "这是来自真实 LLM 路径的 Ask 回答。"
+
+
+def test_ask_mode_stream_events_include_public_node_progress(tmp_path: Path, monkeypatch: object) -> None:
+    disable_llm_env(monkeypatch)
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    write_minimal_java_project(tmp_path)
+
+    events = list(run_ask_mode_events(str(tmp_path), "UserController 是做什么的？"))
+
+    trace_nodes = [event.get("node") for event in events if event["type"] == "trace"]
+    assert "QueryRewriter" in trace_nodes
+    assert "IntentClassifier" in trace_nodes
+    assert "ToolPlanner" in trace_nodes
+    assert "AnswerComposer" in trace_nodes
+    assert any(event["type"] == "tool_plan" for event in events)
+    assert any(event["type"] == "tool_result" for event in events)
+    assert events[-1]["type"] == "final"
+    assert events[-1]["event"]["intent"] == "file_explanation"

@@ -92,3 +92,18 @@ Skill 只做三件事：
 - `llm_model`
 
 回答必须尽量包含相关文件路径、候选实现链路和证据说明；如果当前代码中没有明确证据，必须保守说明。
+
+## SSE 流式进度
+
+`/api/agent/ask/stream` 使用同一个 `AskModeRequest` 请求体，返回 `text/event-stream`。它不替代 `/api/agent/ask` 的最终结构化结果，而是在长等待期间把公开进度推给前端。
+
+事件类型：
+
+- `trace`：一个公开 `TraceEvent`，表示 Query Rewriter、Intent Classifier、Skill Router、Context Retriever、Tool Planner、Evidence Collector、Context Builder、Answer Composer 或 Memory Updater 节点完成。
+- `tool_plan`：本轮只读工具计划，包括是否需要工具、计划原因和候选工具调用。
+- `tool_result`：一个只读工具执行摘要，包括工具名、输入摘要、输出摘要、状态和 reason。
+- `answer`：Answer Composer 完成后的回答文本；第一版是节点级流式，不承诺 token 级增量。
+- `final`：完整 `AskModeResult`，前端应以该 payload 更新 session memory、trace、warnings 和最终回答。
+- `error`：流式执行失败时的错误摘要。
+
+SSE 只展示可给用户看的执行摘要和工具调用理由，不输出模型隐藏推理链。

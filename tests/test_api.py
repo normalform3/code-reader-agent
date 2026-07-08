@@ -446,6 +446,42 @@ def test_agent_ask_api_returns_intent_answer_and_session_memory(tmp_path: Path, 
     assert payload["llm_model"] == "glm-5.1"
 
 
+def test_agent_ask_stream_api_returns_sse_progress_and_final_payload(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+    write_minimal_java_project(tmp_path)
+
+    response = client.post(
+        "/api/agent/ask/stream",
+        json={"project_path": str(tmp_path), "question": "UserController 是做什么的？"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    frames = [frame for frame in response.text.split("\n\n") if frame.strip()]
+    assert any(frame.startswith("event: trace") for frame in frames)
+    assert any(frame.startswith("event: tool_plan") for frame in frames)
+    assert any(frame.startswith("event: tool_result") for frame in frames)
+    assert frames[-1].startswith("event: final")
+    data_line = next(line for line in frames[-1].splitlines() if line.startswith("data: "))
+    payload = json.loads(data_line.removeprefix("data: "))
+    assert payload["type"] == "final"
+    assert payload["event"]["intent"] == "file_explanation"
+    assert payload["event"]["answer"]
+
+
+def test_agent_ask_stream_api_returns_error_event_for_invalid_path(tmp_path: Path) -> None:
+    response = client.post(
+        "/api/agent/ask/stream",
+        json={"project_path": str(tmp_path / "missing"), "question": "项目是什么？"},
+    )
+
+    assert response.status_code == 200
+    assert "event: error" in response.text
+    assert "Project path does not exist" in response.text
+
+
 def test_model_settings_api_updates_model_and_reports_missing_env(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
