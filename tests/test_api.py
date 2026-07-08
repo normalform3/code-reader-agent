@@ -432,6 +432,11 @@ def test_agent_ask_api_returns_intent_answer_and_session_memory(tmp_path: Path, 
     payload = ask_response.json()
     assert payload["intent"] == "tech_stack"
     assert payload["answer"]
+    assert payload["resolved_query"]["resolved_question"] == "项目用了哪些技术栈？"
+    assert payload["intent_result"]["intent"] == "tech_stack"
+    assert payload["tool_plan"]["need_tools"] is True
+    assert payload["context_pack"]["project_context"]
+    assert "code_evidence" in payload
     assert payload["tool_calls"]
     assert payload["tool_calls"][0]["reason"]
     assert payload["session_memory"]["turns"][-1]["intent"] == "tech_stack"
@@ -445,9 +450,14 @@ def test_agent_run_api_returns_llm_result_with_mock(tmp_path: Path, monkeypatch:
         project_path: str,
         question: str,
         max_steps: int = 6,
+        *,
+        max_context_chars: int = 24_000,
+        max_tool_calls: int = 8,
+        max_read_files: int = 4,
         project_manual_context: Any = None,
     ) -> AgentRunResult:
         captured_manual_context["value"] = project_manual_context
+        captured_manual_context["budget"] = (max_context_chars, max_tool_calls, max_read_files)
         return AgentRunResult(
             project_name="mock-project",
             question=question,
@@ -465,6 +475,9 @@ def test_agent_run_api_returns_llm_result_with_mock(tmp_path: Path, monkeypatch:
         json={
             "project_path": str(tmp_path),
             "question": "介绍项目",
+            "max_context_chars": 12000,
+            "max_tool_calls": 3,
+            "max_read_files": 2,
             "project_manual_context": {
                 "title": "mock-project 项目说明书",
                 "overview": None,
@@ -486,3 +499,4 @@ def test_agent_run_api_returns_llm_result_with_mock(tmp_path: Path, monkeypatch:
     assert payload["fallback_used"] is False
     assert payload["final_answer"] == "LLM answer"
     assert captured_manual_context["value"].title == "mock-project 项目说明书"
+    assert captured_manual_context["budget"] == (12000, 3, 2)

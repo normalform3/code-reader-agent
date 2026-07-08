@@ -16,6 +16,7 @@ from code_reader_agent.models import (
     ProjectManualEntrypoint,
     ProjectManualModule,
     ProjectReport,
+    ProjectSummary,
     ReadingPathItem,
     RepoMap,
     ToolCallRecord,
@@ -43,6 +44,7 @@ def enrich_agent_run_result(
     fallback_used: bool,
     fallback_result: ProjectInterpretationResult | None,
     project_manual_context: ProjectManual | None = None,
+    overview_override: ProjectSummary | None = None,
 ) -> AgentRunResult:
     """Attach plan, skills, context, report, and trace to an agent run."""
 
@@ -50,7 +52,7 @@ def enrich_agent_run_result(
     selected_skills = select_skills(repo_map)
     analysis_goal = build_analysis_goal(question)
     analysis_plan = build_analysis_plan(question, repo_map, selected_skills)
-    project_manual = build_project_manual(repo_map)
+    project_manual = build_project_manual(repo_map, overview_override=overview_override)
     project_memory = build_project_memory(repo_map, project_manual)
     context_snapshot = build_context_snapshot(
         repo_map,
@@ -230,7 +232,7 @@ def build_context_snapshot(
     )
 
 
-def build_project_manual(repo_map: RepoMap) -> ProjectManual:
+def build_project_manual(repo_map: RepoMap, overview_override: ProjectSummary | None = None) -> ProjectManual:
     """Build the stable first-pass project manual from deterministic Repo Map data."""
 
     directory_depth = {entry.path: entry.depth for entry in repo_map.file_tree if entry.kind == "directory"}
@@ -254,7 +256,7 @@ def build_project_manual(repo_map: RepoMap) -> ProjectManual:
     )
     return ProjectManual(
         title=f"{repo_map.project_name} 项目说明书",
-        overview=repo_map.project_summary,
+        overview=overview_override or repo_map.project_summary,
         technology_stack=repo_map.stack_explanations[:12],
         modules=[
             ProjectManualModule(

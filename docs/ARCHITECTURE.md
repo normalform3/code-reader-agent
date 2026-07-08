@@ -37,10 +37,12 @@ Frontend UI
 -> 报告沉淀为 Project Memory
 -> 前端展示 Repo Map、报告、trace、证据和工具调用过程
 -> 用户在右侧 Ask 边栏追问
+-> Query Rewriter 结合 Session Memory 做指代消解
 -> Intent Classifier 识别问题类型
--> Context Retriever 检索 Project Memory / Module Summary / File Summary / API Index / Flow Index / Session Memory
+-> Context Retriever 检索 Project Memory / Module Summary / File Summary / API Index / Symbol Index / Flow Index / Session Memory
 -> Tool Planner 判断是否需要只读工具
 -> Evidence Collector 读取真实代码、配置或索引
+-> Context Builder 构造小而准确的 Context Pack
 -> Answer Composer 生成带文件路径和依据的回答
 -> Memory Updater 更新 Session Memory
 ```
@@ -136,8 +138,8 @@ Ask 模式入口：
 
 - `POST /api/agent/ask` 是报告生成后的右侧追问入口。
 - 输入 `project_path`、`question` 和可选 `session_memory`。
-- 返回 `intent`、`answer`、`related_files`、`implementation_path`、`key_code_notes`、`references`、`tool_calls`、`trace_events` 和 `session_memory`。
-- 当前支持 7 类意图：项目总览、模块解释、文件解释、调用链、接口、配置和技术栈。
+- 返回 `resolved_query`、`intent_result`、`tool_plan`、`context_pack`、`code_evidence`、`intent`、`answer`、`related_files`、`implementation_path`、`key_code_notes`、`references`、`tool_calls`、`trace_events` 和 `session_memory`。
+- 当前支持 8 类意图：项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈和符号定位。
 - Ask 模式只允许只读工具，不写被分析仓库，不运行项目命令，不执行 Git 操作。
 
 Legacy Phase 4 单 Agent 解读：
@@ -167,7 +169,7 @@ Legacy Phase 4 单 Agent 解读：
 Ask runtime：
 
 - `code_reader_agent.runtime.ask_mode` 使用 LangGraph `StateGraph` 表达节点流程。
-- 节点顺序固定为 `IntentClassifier -> ContextRetriever -> ToolPlanner -> EvidenceCollector -> AnswerComposer -> MemoryUpdater`。
+- 节点顺序固定为 `QueryRewriter -> IntentClassifier -> ContextRetriever -> ToolPlanner -> EvidenceCollector -> ContextBuilder -> AnswerComposer -> MemoryUpdater`。
 - 如果本地开发环境暂时无法安装 `langgraph`，runtime 会使用同顺序的最小 fallback 以便离线测试；生产依赖仍在 `pyproject.toml` 中声明为 `langgraph`。
 - Ask 第一版使用确定性模板组织回答，LLM 后续只能用于表达组织，不能绕过只读工具和 evidence 边界。
 
@@ -191,6 +193,8 @@ Ask 模式新增只读工具：
 - `parse_api_calls`
 - `parse_controller`
 - `parse_mapper`
+- `search_keyword`
+- `search_api_path`
 
 每次工具调用记录 `tool_name`、输入摘要、输出摘要、状态、错误和 `reason`，前端可展示为什么调用该工具。
 
@@ -261,8 +265,8 @@ Phase 1 最小扫描结果不是完整 Repo Map，只提供后续 Builder 需要
 - `project_sessions`：左侧历史项目会话，只保存项目元数据和内部 `project_path`，删除历史不会删除缓存仓库。
 - `tools`：内置和自定义工具元数据，包含 `details` 结构化详情；内置项不能真正删除，删除会变成禁用。
 - `skills`：内置和自定义 skill 元数据，包含 `details` 结构化详情；自定义 skill 第一版只用于管理弹窗展示，不参与 Agent 路由。
-- `project_memories`：按稳定 `project_path` hash 保存 Project Memory，包含 Project Memory、Module Summary、File Summary、API Index 和 Flow Index。
-- `session_memories`：按项目保存短期 Ask 会话记忆，用于跨轮追问。
+- `project_memories`：按稳定 `project_path` hash 保存 Project Memory 和 Code Knowledge Index，包含 Project Memory、Module Summary、File Summary、API Index、Symbol Index 和 Flow Index。
+- `session_memories`：按项目保存短期 Ask 会话记忆，包含当前话题、关注模块、关注文件/API/流程、上一轮问题和回答摘要，用于跨轮追问。
 
 读取旧 JSON 状态时，如果内置 tool/skill 缺少 `details`，Local State 会自动补齐默认详情，并保留用户已编辑的名称、说明、补充说明和启用状态。
 

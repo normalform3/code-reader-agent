@@ -13,6 +13,7 @@ from code_reader_agent.models import (
     AgentStep,
     EvidenceRef,
     ProjectManual,
+    ProjectSummary,
     ToolCallRecord,
 )
 from code_reader_agent.repo_map.builder import build_repo_map
@@ -23,16 +24,32 @@ from code_reader_agent.runtime.llm_client import LLMConfigurationError, LiteLLMC
 
 
 MAX_TOOL_OUTPUT_CHARS = 10_000
+DEFAULT_MAX_CONTEXT_CHARS = 24_000
+DEFAULT_MAX_TOOL_CALLS = 8
+DEFAULT_MAX_READ_FILES = 4
 AGENT_SYSTEM_PROMPT = """You are CodeReader Agent, a read-only codebase onboarding agent.
 
 You may inspect the local project only through the provided tools.
 Do not claim you read a file unless a tool result contains that file content.
 Do not ask to edit files, run shell commands, use git, or read secrets.
+For project overview tasks, inspect README first. If README has enough information
+to explain what the project is and what it does, do not expand context further.
+If README is missing or insufficient, use build_repo_map first, then read only a
+small number of entrypoint, config, or core module files when necessary.
+Never invent business purpose without evidence; lower confidence and add warnings
+when evidence is thin or the context budget is exhausted.
 
 When you have enough evidence, respond with a JSON object only:
 {
   "answer": "...",
   "skill": "project_overview_skill | setup_analysis_skill | frontend_analysis_skill | api_flow_skill | auth_flow_skill",
+  "project_summary": {
+    "one_liner": "...",
+    "audience": "...",
+    "problem": "...",
+    "confidence": 0.7,
+    "evidence": ["README.md", "package.json"]
+  },
   "evidence": [{"path": "...", "reason": "...", "source": "...", "start_line": 1, "end_line": 3, "excerpt": "..."}],
   "read_files": ["..."],
   "warnings": ["..."],
@@ -48,10 +65,47 @@ class AgentLLMClient(Protocol):
         """Return an OpenAI-compatible chat completion object or dictionary."""
 
 
+class _ContextBudget:
+    """A lightweight character-based circuit breaker for LLM tool context."""
+
+    def __init__(self, max_context_chars: int, max_tool_calls: int, max_read_files: int) -> None:
+        self.max_context_chars = max(1, max_context_chars)
+        self.max_tool_calls = max(1, max_tool_calls)
+        self.max_read_files = max(0, max_read_files)
+        self.context_chars = 0
+        self.tool_calls = 0
+        self.read_files = 0
+
+    def before_tool(self, tool_name: str) -> str | None:
+        if self.tool_calls >= self.max_tool_calls:
+            return f"context budget exceeded: max_tool_calls={self.max_tool_calls}."
+        if tool_name == "read_file" and self.read_files >= self.max_read_files:
+            return f"context budget exceeded: max_read_files={self.max_read_files}."
+        return None
+
+    def after_tool(self, tool_name: str, read_files: list[str], content: str) -> str | None:
+        self.tool_calls += 1
+        if tool_name == "read_file":
+            self.read_files += len(read_files) or 1
+        next_context_chars = self.context_chars + len(content)
+        if next_context_chars > self.max_context_chars:
+            return f"context budget exceeded: max_context_chars={self.max_context_chars}."
+        self.context_chars = next_context_chars
+        if self.tool_calls > self.max_tool_calls:
+            return f"context budget exceeded: max_tool_calls={self.max_tool_calls}."
+        if self.read_files > self.max_read_files:
+            return f"context budget exceeded: max_read_files={self.max_read_files}."
+        return None
+
+
 def run_agent_loop(
     project_path: str,
     question: str,
     max_steps: int = 6,
+    *,
+    max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
+    max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
+    max_read_files: int = DEFAULT_MAX_READ_FILES,
     llm_client: AgentLLMClient | None = None,
     project_manual_context: ProjectManual | None = None,
 ) -> AgentRunResult:
@@ -74,6 +128,11 @@ def run_agent_loop(
     evidence: list[EvidenceRef] = []
     read_files: list[str] = []
     warnings: list[str] = []
+    budget = _ContextBudget(
+        max_context_chars=max_context_chars,
+        max_tool_calls=max_tool_calls,
+        max_read_files=max_read_files,
+    )
 
     for step_index in range(1, max(1, max_steps) + 1):
         try:
@@ -103,11 +162,28 @@ def run_agent_loop(
             for tool_call in tool_call_items:
                 tool_name = _tool_call_name(tool_call)
                 arguments = _tool_call_arguments(tool_call)
+                budget_warning = budget.before_tool(tool_name)
+                if budget_warning:
+                    warnings.append(budget_warning)
+                    agent_steps.append(_budget_step(len(agent_steps) + 1, budget_warning))
+                    return _fallback_result(
+                        fallback,
+                        project_path=project_path,
+                        project_manual_context=project_manual_context,
+                        warning=budget_warning,
+                        evidence=evidence,
+                        tool_calls=tool_calls,
+                        read_files=read_files,
+                        agent_steps=agent_steps,
+                        warnings=warnings,
+                    )
                 result = _execute_tool(project_path, tool_name, arguments)
                 tool_calls.append(result.tool_call)
                 evidence.extend(result.evidence)
                 read_files.extend(result.read_files)
                 warnings.extend(result.warnings)
+                content_for_llm = _truncate_tool_output(result.content)
+                budget_warning = budget.after_tool(tool_name, result.read_files, content_for_llm)
                 agent_steps.append(
                     AgentStep(
                         index=len(agent_steps) + 1,
@@ -118,11 +194,32 @@ def run_agent_loop(
                         status=result.tool_call.status,
                     )
                 )
+                if budget_warning:
+                    warnings.append(budget_warning)
+                    agent_steps.append(_budget_step(len(agent_steps) + 1, budget_warning))
+                    messages.append(
+                        {
+                            "role": "tool",
+                            "tool_call_id": _tool_call_id(tool_call),
+                            "content": json.dumps({"error": budget_warning}, ensure_ascii=False),
+                        }
+                    )
+                    return _fallback_result(
+                        fallback,
+                        project_path=project_path,
+                        project_manual_context=project_manual_context,
+                        warning=budget_warning,
+                        evidence=evidence,
+                        tool_calls=tool_calls,
+                        read_files=read_files,
+                        agent_steps=agent_steps,
+                        warnings=warnings,
+                    )
                 messages.append(
                     {
                         "role": "tool",
                         "tool_call_id": _tool_call_id(tool_call),
-                        "content": _truncate_tool_output(result.content),
+                        "content": content_for_llm,
                     }
                 )
             continue
@@ -141,6 +238,9 @@ def run_agent_loop(
         final_read_files = _dedupe_strings([*read_files, *_string_list(parsed.get("read_files"))])
         final_warnings = _dedupe_strings([*warnings, *_string_list(parsed.get("warnings"))])
         final_questions = _string_list(parsed.get("suggested_questions")) or fallback.suggested_questions
+        overview_override = _parse_project_summary(parsed.get("project_summary"))
+        if parsed.get("project_summary") is not None and overview_override is None:
+            final_warnings.append("LLM project_summary was invalid; deterministic overview was used.")
         agent_steps.append(
             AgentStep(
                 index=len(agent_steps) + 1,
@@ -165,6 +265,7 @@ def run_agent_loop(
             fallback_used=False,
             fallback_result=None,
             project_manual_context=project_manual_context,
+            overview_override=overview_override,
         )
 
     return _fallback_result(
@@ -362,28 +463,44 @@ def _fallback_result(
     project_path: str,
     warning: str,
     project_manual_context: ProjectManual | None = None,
+    evidence: list[EvidenceRef] | None = None,
+    tool_calls: list[ToolCallRecord] | None = None,
+    read_files: list[str] | None = None,
+    agent_steps: list[AgentStep] | None = None,
+    warnings: list[str] | None = None,
 ) -> AgentRunResult:
-    warnings = _dedupe_strings([*fallback.warnings, warning])
+    final_warnings = _dedupe_strings([*fallback.warnings, *(warnings or []), warning])
+    final_agent_steps = agent_steps or [
+        AgentStep(
+            index=1,
+            kind="fallback",
+            title="Deterministic fallback",
+            summary=warning,
+            status="success",
+        )
+    ]
+    if agent_steps:
+        final_agent_steps.append(
+            AgentStep(
+                index=len(final_agent_steps) + 1,
+                kind="fallback",
+                title="Deterministic fallback",
+                summary=warning,
+                status="success",
+            )
+        )
     return enrich_agent_run_result(
         project_path=project_path,
         project_name=fallback.project_name,
         question=fallback.question,
         skill=fallback.skill,
         final_answer=f"{fallback.overview}\n\n{fallback.setup_summary}",
-        evidence=fallback.evidence,
-        tool_calls=fallback.tool_calls,
-        read_files=fallback.read_files,
+        evidence=evidence or fallback.evidence,
+        tool_calls=tool_calls or fallback.tool_calls,
+        read_files=read_files or fallback.read_files,
         suggested_questions=fallback.suggested_questions,
-        warnings=warnings,
-        agent_steps=[
-            AgentStep(
-                index=1,
-                kind="fallback",
-                title="Deterministic fallback",
-                summary=warning,
-                status="success",
-            )
-        ],
+        warnings=final_warnings,
+        agent_steps=final_agent_steps,
         used_llm=False,
         fallback_used=True,
         fallback_result=fallback,
@@ -487,6 +604,25 @@ def _parse_evidence(raw_evidence: Any) -> list[EvidenceRef]:
         except ValidationError:
             continue
     return parsed
+
+
+def _parse_project_summary(raw_summary: Any) -> ProjectSummary | None:
+    if not isinstance(raw_summary, dict):
+        return None
+    try:
+        return ProjectSummary.model_validate(raw_summary)
+    except ValidationError:
+        return None
+
+
+def _budget_step(index: int, warning: str) -> AgentStep:
+    return AgentStep(
+        index=index,
+        kind="fallback",
+        title="Context budget circuit breaker",
+        summary=warning,
+        status="error",
+    )
 
 
 def _string_list(value: Any) -> list[str]:

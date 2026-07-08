@@ -88,6 +88,31 @@ def search_code(
     return _search_with_python(root, query, globs, max_matches)
 
 
+def search_keyword(project_path: str | Path, keyword: str, scope: str | None = None) -> SearchCodeResult:
+    """Search a literal keyword, optionally constrained to a coarse project scope."""
+
+    globs = _globs_for_scope(scope)
+    return search_code(project_path, keyword, globs=globs)
+
+
+def search_api_path(project_path: str | Path, api_path: str) -> SearchCodeResult:
+    """Search for an API path in likely frontend, backend, and config files."""
+
+    globs = [
+        "*.java",
+        "*.ts",
+        "*.tsx",
+        "*.js",
+        "*.jsx",
+        "*.vue",
+        "*.xml",
+        "*.yml",
+        "*.yaml",
+        "*.properties",
+    ]
+    return search_code(project_path, api_path, globs=globs)
+
+
 def list_files(project_path: str | Path, max_depth: int | None = None) -> list[FileTreeEntry]:
     """List the safe project file tree using the scanner ignore rules."""
 
@@ -401,3 +426,16 @@ def _mapper_kind(path: str) -> str:
     if path.endswith("Dao.java"):
         return "dao"
     return "mapping_candidate"
+
+
+def _globs_for_scope(scope: str | None) -> list[str] | None:
+    if scope is None:
+        return None
+    normalized = scope.lower()
+    if normalized in {"frontend", "web", "view"}:
+        return ["*.ts", "*.tsx", "*.js", "*.jsx", "*.vue"]
+    if normalized in {"backend", "java", "server"}:
+        return ["*.java", "*.xml", "*.yml", "*.yaml", "*.properties"]
+    if normalized in {"config", "configuration"}:
+        return ["*.json", "*.toml", "*.xml", "*.yml", "*.yaml", "*.properties", "*.gradle", "*.kts"]
+    return None

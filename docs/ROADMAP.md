@@ -57,8 +57,8 @@
 - `POST /api/agent/run` 支持最小只读 LLM tool loop 和 deterministic fallback。
 - Agent run 已返回 `task_id`、`analysis_goal`、`analysis_plan`、`selected_skills`、`context_snapshot`、`report` 和 `trace_events`。
 - Agent run 已返回并保存 `project_memory`。
-- `POST /api/agent/ask` 支持报告后的 Ask 模式，返回 intent、answer、related files、implementation path、references、tool calls、trace events 和 session memory。
-- Ask 模式支持项目总览、模块解释、文件解释、调用链、接口、配置和技术栈 7 类意图。
+- `POST /api/agent/ask` 支持报告后的 Ask 模式，返回 resolved query、intent result、tool plan、Context Pack、code evidence、answer、related files、implementation path、references、tool calls、trace events 和 session memory。
+- Ask 模式支持项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈和符号定位 8 类意图。
 - Skill Registry 可根据 Repo Map 技术栈选择 `CodebaseOverviewSkill`、`VueSkill` 和 `SpringBootSkill`。
 
 仍未完成：
@@ -102,8 +102,8 @@
 ## Phase 5.2：Project Memory 与 Ask 模式
 
 - 从 Repo Map 和 Project Manual 生成 Project Memory。
-- 保存 Project Memory、Module Summary、File Summary、API Index 和 Flow Index。
-- Ask 模式通过 Intent Classifier、Context Retriever、Tool Planner、Evidence Collector、Answer Composer 和 Memory Updater 回答追问。
+- 保存 Project Memory、Module Summary、File Summary、API Index、Symbol Index 和 Flow Index。
+- Ask 模式通过 Query Rewriter、Intent Classifier、Context Retriever、Tool Planner、Evidence Collector、Context Builder、Answer Composer 和 Memory Updater 回答追问。
 - Ask 模式只调用只读工具，不运行项目命令，不修改代码。
 
 ## Phase 6：专项 Skills 与 Reviewer

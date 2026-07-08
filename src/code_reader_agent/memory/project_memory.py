@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from hashlib import sha1
+
 from code_reader_agent.local_state import project_id_for_path
 from code_reader_agent.models import (
     ApiIndexEntry,
+    DirectoryMemorySummary,
     FileMemorySummary,
     FlowIndexEntry,
     ModuleMemorySummary,
@@ -12,6 +15,7 @@ from code_reader_agent.models import (
     ProjectMemory,
     ProjectMemoryOverview,
     RepoMap,
+    SymbolIndexItem,
 )
 from code_reader_agent.tools.read_only import parse_api_calls, parse_controller
 
@@ -19,21 +23,33 @@ from code_reader_agent.tools.read_only import parse_api_calls, parse_controller
 def build_project_memory(repo_map: RepoMap, project_manual: ProjectManual | None = None) -> ProjectMemory:
     """Build reusable Ask mode memory from deterministic Repo Map data."""
 
+    api_index = _api_index(repo_map)
     project_memory = ProjectMemory(
         project_id=project_id_for_path(repo_map.project_path),
         project_name=repo_map.project_name,
         project_path=repo_map.project_path,
         project_memory=ProjectMemoryOverview(
             positioning=_project_positioning(repo_map, project_manual),
+            description=_project_description(repo_map, project_manual),
+            project_type=_project_type(repo_map),
             tech_stack=[item.name for item in repo_map.stack_explanations] or [item.name for item in repo_map.detected_stack],
             startup_commands=_startup_commands(repo_map),
+            entry_points=[entry.path for entry in repo_map.entrypoints],
+            build_tools=_build_tools(repo_map),
+            config_files=_config_files(repo_map),
+            external_dependencies=_external_dependencies(repo_map),
             modules=[item.name for item in repo_map.modules],
+            directory_summary=[
+                DirectoryMemorySummary(path=item.path, role=item.role)
+                for item in repo_map.directory_insights[:24]
+            ],
         ),
-        module_summaries=_module_summaries(repo_map),
-        file_summaries=_file_summaries(repo_map),
+        module_summaries=_module_summaries(repo_map, api_index),
+        file_summaries=_file_summaries(repo_map, api_index),
+        api_index=api_index,
     )
-    project_memory.api_index = _api_index(repo_map)
     project_memory.flow_index = _flow_index(repo_map, project_memory.api_index)
+    project_memory.symbol_index = _symbol_index(project_memory.file_summaries)
     return project_memory
 
 
@@ -45,6 +61,25 @@ def _project_positioning(repo_map: RepoMap, project_manual: ProjectManual | None
     return f"{repo_map.project_name} 是一个已扫描的本地代码库；当前缺少更明确的项目说明证据。"
 
 
+def _project_description(repo_map: RepoMap, project_manual: ProjectManual | None) -> str:
+    if project_manual and project_manual.overview:
+        return project_manual.overview.problem or project_manual.overview.one_liner
+    if repo_map.project_summary:
+        return repo_map.project_summary.problem or repo_map.project_summary.one_liner
+    return ""
+
+
+def _project_type(repo_map: RepoMap) -> str:
+    stack = {item.name for item in repo_map.detected_stack}
+    if stack & {"Vue", "Vite"} and stack & {"Spring Boot", "Spring Web", "Java"}:
+        return "frontend_backend_web"
+    if stack & {"Spring Boot", "Spring Web", "Java"}:
+        return "java_web"
+    if stack & {"Vue", "Vite"}:
+        return "frontend_web"
+    return "unknown"
+
+
 def _startup_commands(repo_map: RepoMap) -> list[str]:
     commands = [f"{name}: {command}" for name, command in sorted(repo_map.run_scripts.items())]
     if repo_map.java_build_tool == "maven":
@@ -54,7 +89,32 @@ def _startup_commands(repo_map: RepoMap) -> list[str]:
     return commands
 
 
-def _module_summaries(repo_map: RepoMap) -> list[ModuleMemorySummary]:
+def _build_tools(repo_map: RepoMap) -> list[str]:
+    tools: list[str] = []
+    if repo_map.package_manager:
+        tools.append(repo_map.package_manager)
+    if repo_map.java_build_tool:
+        tools.append(repo_map.java_build_tool)
+    return _dedupe_strings(tools)
+
+
+def _config_files(repo_map: RepoMap) -> list[str]:
+    config_roles = {"config", "build_config"}
+    return _dedupe_strings(
+        [
+            entry.path
+            for entry in repo_map.files
+            if entry.role in config_roles
+            or entry.path.endswith(("package.json", "pom.xml", "build.gradle", "build.gradle.kts", ".yml", ".yaml", ".properties"))
+        ]
+    )[:40]
+
+
+def _external_dependencies(repo_map: RepoMap) -> list[str]:
+    return [name for name in sorted(repo_map.dependencies) if name][:80]
+
+
+def _module_summaries(repo_map: RepoMap, api_index: list[ApiIndexEntry]) -> list[ModuleMemorySummary]:
     summaries: list[ModuleMemorySummary] = []
     files_by_path = {item.path: item for item in repo_map.files}
     for module in sorted(repo_map.modules, key=lambda item: (item.reading_priority, item.name)):
@@ -77,24 +137,30 @@ def _module_summaries(repo_map: RepoMap) -> list[ModuleMemorySummary]:
             ModuleMemorySummary(
                 name=module.name,
                 responsibility=module.responsibility,
+                role=module.type,
                 entry_files=module.entry_files,
                 controller_files=controller_files,
                 service_files=service_files,
                 view_files=view_files,
                 api_files=api_files,
                 related_files=related_files,
+                related_apis=_apis_for_files(api_index, related_files),
+                related_entities=[path for path in related_files if files_by_path.get(path) and files_by_path[path].role in {"entity", "dto", "vo"}],
             )
         )
     return summaries
 
 
-def _file_summaries(repo_map: RepoMap) -> list[FileMemorySummary]:
+def _file_summaries(repo_map: RepoMap, api_index: list[ApiIndexEntry]) -> list[FileMemorySummary]:
     return [
         FileMemorySummary(
             path=file.path,
             responsibility=file.summary,
             role=file.role,
-            symbols=file.symbols,
+            language=file.language or "",
+            symbols=file.symbols or _fallback_symbols(file.path),
+            related_apis=_apis_for_files(api_index, [file.path]),
+            hash=_summary_hash(file.path, file.role, file.summary, file.symbols or _fallback_symbols(file.path)),
         )
         for file in sorted(repo_map.files, key=lambda item: (-item.importance_score, item.path))
     ]
@@ -122,6 +188,7 @@ def _api_index(repo_map: RepoMap) -> list[ApiIndexEntry]:
         matched = _find_api_entry(entries_by_key.values(), call_path)
         if matched:
             matched.frontend_calls = _dedupe_strings([*matched.frontend_calls, str(call.get("file") or "")])
+            matched.frontend_call_file = matched.frontend_calls[0] if matched.frontend_calls else None
             continue
         key = (call_path, str(call.get("method") or "") or None, None)
         entries_by_key.setdefault(
@@ -129,6 +196,7 @@ def _api_index(repo_map: RepoMap) -> list[ApiIndexEntry]:
             ApiIndexEntry(
                 path=call_path,
                 method=str(call.get("method") or "") or None,
+                frontend_call_file=str(call.get("file") or "") or None,
                 frontend_calls=[str(call.get("file") or "")],
             ),
         )
@@ -147,6 +215,7 @@ def _flow_index(repo_map: RepoMap, api_index: list[ApiIndexEntry]) -> list[FlowI
             FlowIndexEntry(
                 name="认证/登录流程候选",
                 kind="auth",
+                description="基于文件名、路径和 Repo Map 识别出的认证/登录流程候选。",
                 steps=auth_files,
                 evidence_files=auth_files,
                 confidence=0.55,
@@ -163,6 +232,7 @@ def _flow_index(repo_map: RepoMap, api_index: list[ApiIndexEntry]) -> list[FlowI
             FlowIndexEntry(
                 name="接口调用链候选",
                 kind="api",
+                description="基于 API Index 关联出的前端调用与后端处理文件候选。",
                 steps=api_files[:16],
                 evidence_files=api_files[:16],
                 confidence=0.5,
@@ -173,12 +243,62 @@ def _flow_index(repo_map: RepoMap, api_index: list[ApiIndexEntry]) -> list[FlowI
             FlowIndexEntry(
                 name=path,
                 kind="candidate",
+                description="Repo Map 识别出的流程候选，需要 Ask 模式继续读取真实代码确认。",
                 steps=[path],
                 evidence_files=[path],
                 confidence=0.35,
             )
         )
     return flows
+
+
+def _symbol_index(file_summaries: list[FileMemorySummary]) -> list[SymbolIndexItem]:
+    index: list[SymbolIndexItem] = []
+    for file in file_summaries:
+        for symbol in file.symbols:
+            index.append(
+                SymbolIndexItem(
+                    name=symbol,
+                    kind=_symbol_kind(file.path, file.role, symbol),
+                    file_path=file.path,
+                    summary=file.responsibility,
+                )
+            )
+    return index[:300]
+
+
+def _symbol_kind(path: str, role: str, symbol: str) -> str:
+    if path.endswith(".vue"):
+        return "component"
+    if path.endswith(".java") and symbol[:1].isupper():
+        return "class"
+    if path.endswith((".ts", ".tsx")) and role in {"component", "view"}:
+        return "component"
+    if symbol[:1].isupper():
+        return "class"
+    return "function"
+
+
+def _apis_for_files(api_index: list[ApiIndexEntry], files: list[str]) -> list[str]:
+    wanted = set(files)
+    apis: list[str] = []
+    for entry in api_index:
+        if entry.backend_file in wanted or any(path in wanted for path in entry.frontend_calls):
+            apis.append(entry.path)
+    return _dedupe_strings(apis)
+
+
+def _summary_hash(path: str, role: str, summary: str, symbols: list[str]) -> str:
+    payload = "\n".join([path, role, summary, *symbols])
+    return sha1(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _fallback_symbols(path: str) -> list[str]:
+    name = path.rsplit("/", 1)[-1]
+    stem = name.rsplit(".", 1)[0]
+    if path.endswith((".java", ".vue", ".ts", ".tsx", ".js", ".jsx")) and stem:
+        return [stem]
+    return []
 
 
 def _safe_parse_controller(project_path: str) -> list[dict[str, object]]:

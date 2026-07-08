@@ -259,8 +259,14 @@ type Interpretation = {
 
 type ProjectMemoryOverview = {
   positioning: string;
+  description?: string;
+  project_type?: string;
   tech_stack: string[];
   startup_commands: string[];
+  entry_points?: string[];
+  build_tools?: string[];
+  config_files?: string[];
+  external_dependencies?: string[];
   modules: string[];
 };
 
@@ -276,10 +282,65 @@ type AskIntent =
   | "project_overview"
   | "module_explanation"
   | "file_explanation"
+  | "api_lookup"
+  | "flow_trace"
+  | "config_lookup"
+  | "tech_stack"
+  | "symbol_lookup"
+  | "unknown"
   | "call_chain"
   | "api_usage"
-  | "configuration"
-  | "tech_stack";
+  | "configuration";
+
+type ResolvedQuery = {
+  original_question: string;
+  resolved_question: string;
+  referenced_topic: string | null;
+  referenced_files: string[];
+  referenced_apis: string[];
+  referenced_flows: string[];
+};
+
+type IntentResult = {
+  intent: AskIntent;
+  keywords: string[];
+  possible_files: string[];
+  possible_apis: string[];
+  possible_symbols: string[];
+  need_code_evidence: boolean;
+};
+
+type PlannedToolCall = {
+  tool_name: string;
+  args: Record<string, unknown>;
+  purpose: string;
+};
+
+type ToolPlan = {
+  need_tools: boolean;
+  reason: string;
+  tool_calls: PlannedToolCall[];
+};
+
+type CodeEvidence = {
+  source: "memory" | "tool";
+  file_path: string | null;
+  symbol: string | null;
+  api: string | null;
+  content_summary: string;
+  code_snippet: string | null;
+  relevance_reason: string;
+};
+
+type ContextPack = {
+  user_question: string;
+  resolved_question: string;
+  project_context: string;
+  session_context: string;
+  code_evidence: CodeEvidence[];
+  context_text: string;
+  truncated: boolean;
+};
 
 type SessionMemoryTurn = {
   question: string;
@@ -301,6 +362,11 @@ type AskModeResult = {
   question: string;
   intent: AskIntent;
   answer: string;
+  resolved_query: ResolvedQuery | null;
+  intent_result: IntentResult | null;
+  tool_plan: ToolPlan | null;
+  context_pack: ContextPack | null;
+  code_evidence: CodeEvidence[];
   related_files: string[];
   implementation_path: string[];
   key_code_notes: string[];
@@ -371,7 +437,7 @@ type FileTreeNode = FileTreeEntry & {
   children: FileTreeNode[];
 };
 
-const DEFAULT_QUESTION = "请先为这个仓库生成项目说明书：这是一个什么项目（总览）？用了什么技术栈？每个模块的作用是什么？项目入口在哪里？请给出真实目录树，并解释每个关键目录的作用。";
+const DEFAULT_QUESTION = "请先为这个仓库生成项目说明书：这个项目是什么、主要做什么？用了什么技术栈？有哪些模块和入口？请给出真实目录树，目录解释只需要到模块级。";
 
 function App() {
   const [registryModal, setRegistryModal] = useState<RegistryKind | null>(null);
@@ -459,12 +525,13 @@ function App() {
       });
       setGithubImport(importedProject);
       const analysisQuestion = question.trim() || DEFAULT_QUESTION;
-      const { repoMapResult } = await analyzeProject(importedProject.project_path, analysisQuestion);
+      const { repoMapResult, interpretationResult } = await analyzeProject(importedProject.project_path, analysisQuestion);
       setAskMessages([
         {
           id: `${Date.now()}-manual`,
           role: "assistant",
           body:
+            interpretationText(interpretationResult.project_manual?.overview?.one_liner) ||
             interpretationText(repoMapResult.project_summary?.one_liner) ||
             `${repoMapResult.project_name} 的项目说明书已生成，可以继续在右侧追问。`,
           meta: "项目说明书",
@@ -903,17 +970,17 @@ function ProjectWorkspace({
             <div className="detail-heading">
               <div>
                 <p className="kicker">代码库总览</p>
-                <h3>{manualOverview?.one_liner ?? "扫描完成后生成项目一句话解释"}</h3>
+                <h3>{manualOverview?.one_liner ?? "扫描完成后生成项目概述"}</h3>
               </div>
               {manualOverview ? <span>{Math.round(manualOverview.confidence * 100)}% 置信度</span> : null}
             </div>
             <div className="summary-grid">
               <div>
-                <strong>面向谁</strong>
+                <strong>这个项目是什么</strong>
                 <p>{manualOverview?.audience ?? "等待 README、配置和入口文件证据。"}</p>
               </div>
               <div>
-                <strong>解决什么问题</strong>
+                <strong>主要做什么</strong>
                 <p>{manualOverview?.problem ?? "证据不足时会明确提示低置信度。"}</p>
               </div>
             </div>
@@ -1073,17 +1140,29 @@ function AgentPanel({
           </div>
           <div className="mini-list">
             {askResult ? <code>{intentLabel(askResult.intent)}</code> : null}
+            {askResult?.resolved_query ? <code>Resolved</code> : null}
+            {askResult?.context_pack ? <code>{askResult.context_pack.truncated ? "Context trimmed" : "Context Pack"}</code> : null}
             {askResult?.tool_calls.slice(0, 4).map((call, index) => (
               <code key={`${call.tool_name}-${index}`}>{call.tool_name}</code>
             ))}
             {interpretation?.selected_skills?.map((skill) => <code key={skill}>{skill}</code>) ?? null}
-            {askResult ? <span className="muted">{askResult.references.length} 条 Ask evidence · {askResult.session_memory.turns.length} 轮记忆</span> : null}
+            {askResult ? <span className="muted">{askResult.code_evidence.length || askResult.references.length} 条 Ask evidence · {askResult.session_memory.turns.length} 轮记忆</span> : null}
             {interpretation?.context_snapshot ? (
               <span className="muted">
                   {interpretation.context_snapshot.evidence_count} 条 evidence · {interpretation.context_snapshot.read_files.length} 个已读取文件
                 </span>
               ) : null}
             </div>
+            {askResult?.resolved_query ? (
+              <p className="context-note">
+                {askResult.resolved_query.resolved_question}
+              </p>
+            ) : null}
+            {askResult?.tool_plan ? (
+              <p className="context-note">
+                {askResult.tool_plan.reason}
+              </p>
+            ) : null}
           </details>
 
         <details>
@@ -1117,9 +1196,26 @@ function AgentPanel({
 }
 
 function ProjectManualCard({ manual }: { manual: ProjectManual | null }) {
-  const keyDirectories = useMemo(() => {
-    return manual?.key_directories.filter(isHighLevelDirectoryInsight).slice(0, 8) ?? [];
+  const moduleDirectories = useMemo(() => {
+    return manual?.key_directories.filter(isModuleLevelDirectoryInsight) ?? [];
   }, [manual]);
+  const [selectedDirectoryPath, setSelectedDirectoryPath] = useState<string | null>(null);
+  const directoryByPath = useMemo(() => {
+    return new Map(moduleDirectories.map((directory) => [directory.path, directory]));
+  }, [moduleDirectories]);
+  const selectedDirectory =
+    (selectedDirectoryPath ? directoryByPath.get(selectedDirectoryPath) : null) ?? moduleDirectories[0] ?? null;
+
+  useEffect(() => {
+    if (!manual) {
+      setSelectedDirectoryPath(null);
+      return;
+    }
+    if (selectedDirectoryPath && directoryByPath.has(selectedDirectoryPath)) {
+      return;
+    }
+    setSelectedDirectoryPath(moduleDirectories[0]?.path ?? null);
+  }, [directoryByPath, manual, moduleDirectories, selectedDirectoryPath]);
 
   if (!manual) {
     return (
@@ -1182,28 +1278,39 @@ function ProjectManualCard({ manual }: { manual: ProjectManual | null }) {
           <h4>真实目录树</h4>
           <div className="tree-list compact">
             {manual.directory_tree.slice(0, 42).map((entry) => (
-              <div className="tree-row" key={entry.path} style={{ paddingLeft: `${entry.depth * 12 + 8}px` }}>
+              <button
+                className={
+                  entry.kind === "directory" && entry.path === selectedDirectory?.path
+                    ? "tree-row selectable active"
+                    : entry.kind === "directory" && directoryByPath.has(entry.path)
+                      ? "tree-row selectable"
+                      : "tree-row"
+                }
+                disabled={entry.kind !== "directory" || !directoryByPath.has(entry.path)}
+                key={entry.path}
+                onClick={() => setSelectedDirectoryPath(entry.path)}
+                style={{ paddingLeft: `${entry.depth * 12 + 8}px` }}
+                type="button"
+              >
                 <span>{entry.kind === "directory" ? "dir" : "file"}</span>
                 <code>{entry.path}</code>
-              </div>
+              </button>
             ))}
           </div>
         </div>
         <div>
-          <h4>关键目录解释</h4>
-          <div className="manual-directory-list">
-            {keyDirectories.length > 0 ? (
-              keyDirectories.map((directory) => (
-                <div className="manual-row" key={directory.path}>
-                  <code>{directory.path}</code>
-                  <span>
-                    {directory.role} · {directory.importance}
-                  </span>
-                  <p>{directory.reason}</p>
-                </div>
-              ))
+          <h4>目录作用</h4>
+          <div className="manual-directory-detail">
+            {selectedDirectory ? (
+              <div className="manual-row">
+                <code>{selectedDirectory.path}</code>
+                <span>
+                  {selectedDirectory.role} · {selectedDirectory.importance}
+                </span>
+                <p>{selectedDirectory.reason}</p>
+              </div>
             ) : (
-              <span className="muted">暂无顶层或典型分层目录解释。</span>
+              <span className="muted">点击左侧模块级目录后，会显示该目录的作用。</span>
             )}
           </div>
         </div>
@@ -1496,7 +1603,7 @@ function sortFileTreeNodes(nodes: FileTreeNode[]) {
   }
 }
 
-function isHighLevelDirectoryInsight(directory: ProjectManualDirectory) {
+function isModuleLevelDirectoryInsight(directory: ProjectManualDirectory) {
   if (directory.depth <= 1) {
     return true;
   }
@@ -1600,10 +1707,15 @@ function intentLabel(intent: AskIntent) {
     project_overview: "项目总览",
     module_explanation: "模块解释",
     file_explanation: "文件解释",
+    api_lookup: "接口",
+    flow_trace: "调用链",
+    config_lookup: "配置",
+    tech_stack: "技术栈",
+    symbol_lookup: "符号",
+    unknown: "未知",
     call_chain: "调用链",
     api_usage: "接口",
     configuration: "配置",
-    tech_stack: "技术栈",
   };
   return labels[intent];
 }

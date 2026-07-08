@@ -57,6 +57,13 @@ def test_agent_loop_executes_tool_and_parses_final_answer(tmp_path: Path) -> Non
                 {
                     "answer": "这是一个 Vue 项目，package.json 提供了运行脚本。",
                     "skill": "project_overview_skill",
+                    "project_summary": {
+                        "one_liner": "LLM 判断这是一个 Vue 项目。",
+                        "audience": "面向维护 Vue 前端的开发者。",
+                        "problem": "用于提供一个 Vue 单页应用。",
+                        "confidence": 0.81,
+                        "evidence": ["package.json"],
+                    },
                     "evidence": [
                         {
                             "path": "package.json",
@@ -84,11 +91,148 @@ def test_agent_loop_executes_tool_and_parses_final_answer(tmp_path: Path) -> Non
     assert "VueSkill" in result.selected_skills
     assert result.project_manual.title.endswith("项目说明书")
     assert result.project_manual.overview is not None
+    assert result.project_manual.overview.one_liner == "LLM 判断这是一个 Vue 项目。"
     assert any(item.name == "Vue" for item in result.project_manual.technology_stack)
     assert result.project_manual.modules
     assert result.project_manual.entrypoints
     assert result.project_manual.directory_tree
     assert result.report.title.endswith("项目解读报告")
+
+
+def test_agent_loop_uses_llm_project_summary_from_readme(tmp_path: Path) -> None:
+    write_minimal_vue_project(tmp_path)
+    (tmp_path / "README.md").write_text("# Product Desk\n\n一个面向运营人员的项目工作台。\n", encoding="utf-8")
+    client = FakeLLMClient(
+        [
+            tool_call_response("read_file", {"relative_path": "README.md"}),
+            final_response(
+                {
+                    "answer": "这是 Product Desk 项目。",
+                    "skill": "project_overview_skill",
+                    "project_summary": {
+                        "one_liner": "Product Desk 是一个面向运营人员的项目工作台。",
+                        "audience": "面向运营人员和维护该仓库的开发者。",
+                        "problem": "帮助运营人员管理项目工作流。",
+                        "confidence": 0.9,
+                        "evidence": ["README.md"],
+                    },
+                    "evidence": [],
+                    "read_files": ["README.md"],
+                    "warnings": [],
+                    "suggested_questions": [],
+                }
+            ),
+        ]
+    )
+
+    result = run_agent_loop(str(tmp_path), "生成项目总览", llm_client=client)
+
+    assert result.project_manual.overview is not None
+    assert result.project_manual.overview.one_liner.startswith("Product Desk")
+    assert result.project_manual.overview.evidence == ["README.md"]
+    assert "build_repo_map" not in {call.tool_name for call in result.tool_calls}
+
+
+def test_agent_loop_uses_repo_map_when_readme_is_insufficient(tmp_path: Path) -> None:
+    write_minimal_vue_project(tmp_path)
+    (tmp_path / "README.md").write_text("# TODO\n", encoding="utf-8")
+    client = FakeLLMClient(
+        [
+            tool_call_response("read_file", {"relative_path": "README.md"}),
+            tool_call_response("build_repo_map", {}, call_id="call_2"),
+            final_response(
+                {
+                    "answer": "README 不足，结合 Repo Map 判断这是 Vue 应用。",
+                    "skill": "project_overview_skill",
+                    "project_summary": {
+                        "one_liner": "这是一个基于 Vue/Vite 的前端应用。",
+                        "audience": "面向前端开发者。",
+                        "problem": "提供单页应用入口、路由和组件结构。",
+                        "confidence": 0.68,
+                        "evidence": ["README.md", "package.json", "src/main.ts"],
+                    },
+                    "evidence": [],
+                    "read_files": ["README.md"],
+                    "warnings": ["README 信息不足，已补充 Repo Map 上下文。"],
+                    "suggested_questions": [],
+                }
+            ),
+        ]
+    )
+
+    result = run_agent_loop(str(tmp_path), "生成项目总览", llm_client=client)
+
+    assert result.project_manual.overview is not None
+    assert "Vue/Vite" in result.project_manual.overview.one_liner
+    assert "build_repo_map" in {call.tool_name for call in result.tool_calls}
+    assert any("README 信息不足" in warning for warning in result.warnings)
+
+
+def test_agent_loop_ignores_invalid_llm_project_summary(tmp_path: Path) -> None:
+    write_minimal_vue_project(tmp_path)
+    client = FakeLLMClient(
+        [
+            final_response(
+                {
+                    "answer": "这是一个 Vue 项目。",
+                    "skill": "project_overview_skill",
+                    "project_summary": {"one_liner": "缺少必要字段"},
+                    "evidence": [],
+                    "read_files": [],
+                    "warnings": [],
+                    "suggested_questions": [],
+                }
+            ),
+        ]
+    )
+
+    result = run_agent_loop(str(tmp_path), "生成项目总览", llm_client=client)
+
+    assert result.project_manual.overview is not None
+    assert result.project_manual.overview.one_liner != "缺少必要字段"
+    assert any("project_summary was invalid" in warning for warning in result.warnings)
+
+
+def test_agent_loop_trips_context_budget_for_tool_output(tmp_path: Path) -> None:
+    write_minimal_vue_project(tmp_path)
+    client = FakeLLMClient([tool_call_response("build_repo_map", {})])
+
+    result = run_agent_loop(str(tmp_path), "生成项目总览", max_context_chars=20, llm_client=client)
+
+    assert result.fallback_used is True
+    assert any("context budget exceeded" in warning for warning in result.warnings)
+    assert any(step.title == "Context budget circuit breaker" for step in result.agent_steps)
+    assert any(event.stage == "Agent Runtime" and "Context budget" in event.title for event in result.trace_events)
+
+
+def test_agent_loop_trips_max_tool_calls_budget(tmp_path: Path) -> None:
+    write_minimal_vue_project(tmp_path)
+    client = FakeLLMClient(
+        [
+            tool_call_response("read_file", {"relative_path": "package.json"}),
+            tool_call_response("read_file", {"relative_path": "src/main.ts"}, call_id="call_2"),
+        ]
+    )
+
+    result = run_agent_loop(str(tmp_path), "生成项目总览", max_tool_calls=1, llm_client=client)
+
+    assert result.fallback_used is True
+    assert any("max_tool_calls=1" in warning for warning in result.warnings)
+
+
+def test_agent_loop_trips_max_read_files_budget(tmp_path: Path) -> None:
+    write_minimal_vue_project(tmp_path)
+    client = FakeLLMClient(
+        [
+            tool_call_response("read_file", {"relative_path": "package.json"}),
+            tool_call_response("read_file", {"relative_path": "src/main.ts"}, call_id="call_2"),
+        ]
+    )
+
+    result = run_agent_loop(str(tmp_path), "生成项目总览", max_read_files=1, llm_client=client)
+
+    assert result.fallback_used is True
+    assert any("max_read_files=1" in warning for warning in result.warnings)
 
 
 def test_agent_loop_uses_fallback_on_llm_error(tmp_path: Path) -> None:

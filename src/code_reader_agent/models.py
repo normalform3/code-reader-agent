@@ -438,6 +438,9 @@ class AgentRunRequest(BaseModel):
     project_path: str
     question: str = "这个项目是干什么的？我应该怎么运行，并从哪些文件开始看？"
     max_steps: int = 6
+    max_context_chars: int = 24_000
+    max_tool_calls: int = 8
+    max_read_files: int = 4
     project_manual_context: ProjectManual | None = None
 
 
@@ -493,20 +496,40 @@ AskIntent = Literal[
     "project_overview",
     "module_explanation",
     "file_explanation",
+    "api_lookup",
+    "flow_trace",
+    "config_lookup",
+    "tech_stack",
+    "symbol_lookup",
+    "unknown",
+    # Legacy values kept so older .codereader/state.json files still load.
     "call_chain",
     "api_usage",
     "configuration",
-    "tech_stack",
 ]
+
+
+class DirectoryMemorySummary(BaseModel):
+    """Directory-level project memory used for overview and navigation questions."""
+
+    path: str
+    role: str
 
 
 class ProjectMemoryOverview(BaseModel):
     """Reusable project-level memory generated from the first report."""
 
     positioning: str = ""
+    description: str = ""
+    project_type: str = ""
     tech_stack: list[str] = Field(default_factory=list)
     startup_commands: list[str] = Field(default_factory=list)
+    entry_points: list[str] = Field(default_factory=list)
+    build_tools: list[str] = Field(default_factory=list)
+    config_files: list[str] = Field(default_factory=list)
+    external_dependencies: list[str] = Field(default_factory=list)
     modules: list[str] = Field(default_factory=list)
+    directory_summary: list[DirectoryMemorySummary] = Field(default_factory=list)
 
 
 class ModuleMemorySummary(BaseModel):
@@ -514,12 +537,15 @@ class ModuleMemorySummary(BaseModel):
 
     name: str
     responsibility: str
+    role: str = ""
     entry_files: list[str] = Field(default_factory=list)
     controller_files: list[str] = Field(default_factory=list)
     service_files: list[str] = Field(default_factory=list)
     view_files: list[str] = Field(default_factory=list)
     api_files: list[str] = Field(default_factory=list)
     related_files: list[str] = Field(default_factory=list)
+    related_apis: list[str] = Field(default_factory=list)
+    related_entities: list[str] = Field(default_factory=list)
 
 
 class FileMemorySummary(BaseModel):
@@ -528,7 +554,12 @@ class FileMemorySummary(BaseModel):
     path: str
     responsibility: str
     role: str = ""
+    language: str = ""
     symbols: list[str] = Field(default_factory=list)
+    imports: list[str] = Field(default_factory=list)
+    exports: list[str] = Field(default_factory=list)
+    related_apis: list[str] = Field(default_factory=list)
+    hash: str = ""
 
 
 class ApiIndexEntry(BaseModel):
@@ -538,7 +569,11 @@ class ApiIndexEntry(BaseModel):
     method: str | None = None
     backend_method: str | None = None
     backend_file: str | None = None
+    frontend_call_file: str | None = None
     frontend_calls: list[str] = Field(default_factory=list)
+    request_type: str | None = None
+    response_type: str | None = None
+    description: str | None = None
 
 
 class FlowIndexEntry(BaseModel):
@@ -546,9 +581,20 @@ class FlowIndexEntry(BaseModel):
 
     name: str
     kind: str
+    description: str = ""
     steps: list[str] = Field(default_factory=list)
     evidence_files: list[str] = Field(default_factory=list)
     confidence: float = 0.5
+
+
+class SymbolIndexItem(BaseModel):
+    """Symbol index entry used by Ask mode symbol lookup."""
+
+    name: str
+    kind: Literal["class", "method", "function", "component", "interface", "type"]
+    file_path: str
+    signature: str | None = None
+    summary: str | None = None
 
 
 class ProjectMemory(BaseModel):
@@ -562,6 +608,7 @@ class ProjectMemory(BaseModel):
     file_summaries: list[FileMemorySummary] = Field(default_factory=list)
     api_index: list[ApiIndexEntry] = Field(default_factory=list)
     flow_index: list[FlowIndexEntry] = Field(default_factory=list)
+    symbol_index: list[SymbolIndexItem] = Field(default_factory=list)
     updated_at: str = ""
 
 
@@ -572,6 +619,8 @@ class SessionMemoryTurn(BaseModel):
     intent: AskIntent
     referenced_files: list[str] = Field(default_factory=list)
     referenced_apis: list[str] = Field(default_factory=list)
+    referenced_flows: list[str] = Field(default_factory=list)
+    resolved_question: str = ""
     answer_summary: str = ""
 
 
@@ -579,8 +628,83 @@ class SessionMemory(BaseModel):
     """Short project session memory used by Ask mode."""
 
     project_id: str
+    current_topic: str | None = None
+    focused_module: str | None = None
+    focused_files: list[str] = Field(default_factory=list)
+    focused_apis: list[str] = Field(default_factory=list)
+    focused_flows: list[str] = Field(default_factory=list)
+    last_question: str | None = None
+    last_resolved_question: str | None = None
+    last_answer_summary: str | None = None
     turns: list[SessionMemoryTurn] = Field(default_factory=list)
     updated_at: str = ""
+
+
+class ResolvedQuery(BaseModel):
+    """Question after resolving follow-up references from session memory."""
+
+    original_question: str
+    resolved_question: str
+    referenced_topic: str | None = None
+    referenced_files: list[str] = Field(default_factory=list)
+    referenced_apis: list[str] = Field(default_factory=list)
+    referenced_flows: list[str] = Field(default_factory=list)
+
+
+class IntentResult(BaseModel):
+    """Structured Ask intent classification result."""
+
+    intent: AskIntent
+    keywords: list[str] = Field(default_factory=list)
+    possible_files: list[str] = Field(default_factory=list)
+    possible_apis: list[str] = Field(default_factory=list)
+    possible_symbols: list[str] = Field(default_factory=list)
+    need_code_evidence: bool = False
+
+
+class PlannedToolCall(BaseModel):
+    """One read-only tool call planned by Ask mode."""
+
+    tool_name: str
+    args: dict[str, object] = Field(default_factory=dict)
+    purpose: str
+
+
+class ToolPlan(BaseModel):
+    """Read-only tool plan for an Ask request."""
+
+    need_tools: bool
+    reason: str
+    tool_calls: list[PlannedToolCall] = Field(default_factory=list)
+
+
+class CodeEvidence(BaseModel):
+    """Short evidence item selected for a Context Pack."""
+
+    source: Literal["memory", "tool"]
+    file_path: str | None = None
+    symbol: str | None = None
+    api: str | None = None
+    content_summary: str
+    code_snippet: str | None = None
+    relevance_reason: str
+
+
+class ContextPack(BaseModel):
+    """Small context bundle used by Ask answer composition."""
+
+    user_question: str
+    resolved_question: str
+    project_context: str
+    session_context: str
+    relevant_modules: list[ModuleMemorySummary] = Field(default_factory=list)
+    relevant_files: list[FileMemorySummary] = Field(default_factory=list)
+    relevant_apis: list[ApiIndexEntry] = Field(default_factory=list)
+    relevant_flows: list[FlowIndexEntry] = Field(default_factory=list)
+    code_evidence: list[CodeEvidence] = Field(default_factory=list)
+    answer_instructions: str = ""
+    context_text: str = ""
+    truncated: bool = False
 
 
 class AskModeRequest(BaseModel):
@@ -599,6 +723,11 @@ class AskModeResult(BaseModel):
     question: str
     intent: AskIntent
     answer: str
+    resolved_query: ResolvedQuery | None = None
+    intent_result: IntentResult | None = None
+    tool_plan: ToolPlan | None = None
+    context_pack: ContextPack | None = None
+    code_evidence: list[CodeEvidence] = Field(default_factory=list)
     related_files: list[str] = Field(default_factory=list)
     implementation_path: list[str] = Field(default_factory=list)
     key_code_notes: list[str] = Field(default_factory=list)

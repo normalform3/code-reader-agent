@@ -8,6 +8,7 @@
 - `SKILLS.md`：技能机制和第一批 skills。
 - `TOOLS.md`：工具系统和安全边界。
 - `CONTEXT_MANAGER.md`：上下文管理策略。
+- `ASK_MODE.md`：报告后的 Ask 模式流程、上下文层和输出契约。
 - `AGENTS.md`：多 Agent 协作设计。
 - `ROADMAP.md`：开发路线。
 - `DECISIONS.md`：技术决策记录。

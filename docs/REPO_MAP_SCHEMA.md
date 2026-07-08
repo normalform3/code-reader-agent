@@ -96,7 +96,7 @@ reading_recommendation:
 
 ## Project Manual 结构
 
-`ProjectManual` 不是新的扫描来源，而是由 Repo Map 确定性组装出来的首次项目说明书。它作为 `/api/agent/run` 的 `project_manual` 返回；报告后的追问优先使用由它和 Repo Map 派生出的 `ProjectMemory`。
+`ProjectManual` 不是新的扫描来源。它作为 `/api/agent/run` 的 `project_manual` 返回；报告后的追问优先使用由它和 Repo Map 派生出的 `ProjectMemory`。除 `overview` 外，第一版说明书主体仍由 Repo Map 确定性组装；`overview` 可由 LLM 基于 README 和只读工具上下文生成并覆盖 Repo Map 的确定性基线。
 
 ```text
 project_manual:
@@ -114,7 +114,7 @@ project_manual:
 
 字段说明：
 
-- `overview`：复用 `ProjectSummary`，回答“这是一个什么项目”。
+- `overview`：复用 `ProjectSummary`，回答“这是一个什么项目”。优先使用 LLM 校验后的 `project_summary`；LLM 不可用、输出不合法或触发预算熔断时，回退到 `repo_map.project_summary`。
 - `technology_stack`：复用 `StackExplanation`，解释技术栈和项目作用。
 - `modules`：模块作用说明，来自 Repo Map modules。
 - `entrypoints`：入口候选及解释，来自扫描器 entrypoints。
@@ -136,6 +136,7 @@ project_memory:
 - module_summaries
 - file_summaries
 - api_index
+- symbol_index
 - flow_index
 - updated_at
 ```
@@ -145,9 +146,16 @@ project_memory:
 ```text
 project_memory:
 - positioning
+- description
+- project_type
 - tech_stack
 - startup_commands
+- entry_points
+- build_tools
+- config_files
+- external_dependencies
 - modules
+- directory_summary
 ```
 
 ### Module Summary
@@ -156,12 +164,15 @@ project_memory:
 module_summary:
 - name
 - responsibility
+- role
 - entry_files
 - controller_files
 - service_files
 - view_files
 - api_files
 - related_files
+- related_apis
+- related_entities
 ```
 
 ### File Summary
@@ -171,7 +182,12 @@ file_summary:
 - path
 - responsibility
 - role
+- language
 - symbols
+- imports
+- exports
+- related_apis
+- hash
 ```
 
 ### API Index
@@ -182,7 +198,22 @@ api_index:
 - method
 - backend_method
 - backend_file
+- frontend_call_file
 - frontend_calls
+- request_type
+- response_type
+- description
+```
+
+### Symbol Index
+
+```text
+symbol_index:
+- name
+- kind
+- file_path
+- signature
+- summary
 ```
 
 ### Flow Index
@@ -191,12 +222,13 @@ api_index:
 flow_index:
 - name
 - kind
+- description
 - steps
 - evidence_files
 - confidence
 ```
 
-第一版 `api_index` 和 `flow_index` 是候选级索引：Spring Controller、前端 axios/fetch/request 调用、登录/auth/API 相关文件会被收集，但不声明精准 AST 级跨文件调用链。
+第一版 `api_index`、`symbol_index` 和 `flow_index` 是候选级索引：Spring Controller、前端 axios/fetch/request 调用、文件名/符号名、登录/auth/API 相关文件会被收集，但不声明精准 AST 级跨文件调用链。
 
 ## Module 结构
 

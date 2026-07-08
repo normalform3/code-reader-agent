@@ -37,8 +37,8 @@ CodeReader Agent 的目标是把这些理解过程变成两阶段工作流：第
 - 识别核心模块、接口调用链、登录认证流程和状态管理逻辑。
 - Analyzer 和 Report Writer 输出项目地图、模块说明、关键入口、阅读路线、调用链候选和证据。
 - Trace Logger 记录计划、工具调用、上下文更新和最终产物。
-- 报告生成后沉淀 `ProjectMemory`，包含 Project Memory、Module Summary、File Summary、API Index 和 Flow Index。
-- Ask 模式通过 Intent Classifier、Context Retriever、Tool Planner、Evidence Collector、Answer Composer 和 Memory Updater 回答追问，并更新 `SessionMemory`。
+- 报告生成后沉淀 `ProjectMemory` 和 Code Knowledge Index，包含 Project Memory、Module Summary、File Summary、API Index、Symbol Index 和 Flow Index。
+- Ask 模式通过 Query Rewriter、Intent Classifier、Context Retriever、Tool Planner、Evidence Collector、Context Builder、Answer Composer 和 Memory Updater 回答追问，并更新 `SessionMemory`。
 
 ## 核心用户痛点
 
@@ -82,9 +82,10 @@ CodeReader Agent 的目标是把这些理解过程变成两阶段工作流：第
   - 调用链候选。
   - evidence 和不确定点。
 - 报告生成后提供右侧 Ask 边栏：
-  - 支持项目总览、模块解释、文件解释、调用链、接口、配置和技术栈问题意图。
-  - 优先检索 Project Memory、Module Summary、File Summary、API Index 和 Flow Index。
+  - 支持项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈和符号定位问题意图。
+  - 优先检索 Project Memory、Module Summary、File Summary、API Index、Symbol Index、Flow Index 和 Session Memory。
   - 上下文不足时调用只读工具读取文件、搜索关键词、解析依赖、路由、API 调用、Controller 和 Mapper 候选。
+  - 构造小而准确的 Context Pack，避免每次把全量代码库塞给模型。
   - 回答包含相关文件、候选实现路径、关键代码说明和参考依据。
 
 ## 非目标范围
@@ -169,7 +170,7 @@ npm run dev
 - 已有确定性的 Repo Map 数据结构和 Builder 初版。
 - Web UI 已支持输入公开 GitHub 仓库链接、触发导入和分析、展示技术栈、入口文件、模块卡片、模块详情、分析计划、技能选择、上下文快照、结构化报告、工具调用、trace、证据和提醒。
 - Agent 项目解读支持可选 LLM tool loop；LLM 不可用时仍输出完整 plan、context、report 和 trace。
-- `/api/agent/run` 会返回并保存 `project_memory`；`/api/agent/ask` 会返回 intent、answer、related files、implementation path、references、tool calls、trace events 和 session memory。
+- `/api/agent/run` 会返回并保存 `project_memory`；`/api/agent/ask` 会返回 resolved query、intent result、tool plan、Context Pack、code evidence、answer、related files、implementation path、references、tool calls、trace events 和 session memory。
 - Agent 解释已支持最小 Skill Registry，可按检测到的栈选择 `CodebaseOverviewSkill`、`VueSkill` 和 `SpringBootSkill`。
 - Repo Map 和 Agent 解释已支持片段级 evidence、已读取文件和工具调用记录。
 - 已有基础测试覆盖扫描、Repo Map、解释器、Ask 模式和 API 行为。
@@ -186,8 +187,8 @@ npm run dev
 
 短期优先级：
 
-1. 稳定 Ask 模式：继续增强 7 类意图分类、Context Retriever 和 Tool Planner。
-2. 扩充 Project Memory：提高 API Index、Flow Index、File Summary 的覆盖面。
+1. 稳定 Ask 模式：继续增强指代消解、8 类意图分类、Context Retriever、Tool Planner 和 Context Pack。
+2. 扩充 Project Memory：提高 API Index、Symbol Index、Flow Index、File Summary 的覆盖面。
 3. 完善 Web UI：让 Ask trace、工具调用、证据和 Session Memory 更清楚。
 4. 强化证据追踪：让每个模块、入口、运行命令和 Ask 回答都能关联到明确文件路径或配置来源。
 5. 扩展专项 skill：逐步增强 Spring Boot 分层结构、Vue 页面结构、API 调用链候选和认证流程候选。
@@ -208,7 +209,7 @@ npm run dev
 - Phase 3：Web UI 原型，展示文件树、模块树、项目概览。
 - Phase 4：可信理解闭环，包含 evidence、只读工具和基础工作台。
 - Phase 5：目标驱动项目理解报告，包含 Planner、Skill Registry、Context Snapshot、Report Writer 和 Trace Logger。
-- Phase 6：Ask 模式，包含 Project Memory、Intent Classifier、Context Retriever、Tool Planner、Evidence Collector、Answer Composer 和 Session Memory。
+- Phase 6：Ask 模式，包含 Project Memory、Code Knowledge Index、Session Memory、Query Rewriter、Intent Classifier、Context Retriever、Tool Planner、Evidence Collector、Context Builder、Answer Composer 和 Memory Updater。
 - Phase 7：专项 Skills 与 Reviewer，支持登录流程、API 流程、页面数据来源和 Java 分层结构分析。
 - Phase 8：Codebase Map 可视化增强。
 - Phase 9：TUI / 桌面端体验优化和更多真实项目 demo。

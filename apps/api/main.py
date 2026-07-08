@@ -238,6 +238,9 @@ def run_agent_api(request: AgentRunRequest) -> AgentRunResult:
             request.project_path,
             request.question,
             request.max_steps,
+            max_context_chars=request.max_context_chars,
+            max_tool_calls=request.max_tool_calls,
+            max_read_files=request.max_read_files,
             project_manual_context=request.project_manual_context,
         )
         if result.project_memory:

@@ -7,7 +7,13 @@ Context Manager 负责为代码库理解 Agent 选择和组织必要上下文。
 MVP 中 Context Manager 有两条路径：
 
 - `/api/agent/run` 返回 `context_snapshot`，用于展示首次项目理解报告使用了哪些项目上下文、任务上下文、符号上下文和当前记忆上下文。
-- `/api/agent/ask` 优先检索结构化 `ProjectMemory` 和 `SessionMemory`，再决定是否调用只读工具补充代码证据。
+- `/api/agent/ask` 先做指代消解，再检索结构化 `ProjectMemory`、Code Knowledge Index 和 `SessionMemory`，按需调用只读工具补充代码证据，最后构造 `ContextPack` 回答。
+
+Ask 模式的上下文分三层：
+
+- `Project Memory`：项目定位、技术栈、启动方式、入口、配置、依赖、模块和目录摘要。
+- `Code Knowledge Index`：Module Summary、File Summary、API Index、Symbol Index 和 Flow Index。
+- `Session Memory`：当前话题、关注模块、关注文件/API/流程、上一轮问题和回答摘要。
 
 ## 上下文类型
 
@@ -70,9 +76,12 @@ MVP 中 Context Manager 有两条路径：
 Ask 模式已经保存短期会话记忆：
 
 - 最近问题。
+- 指代消解后的问题。
 - 问题意图。
+- 当前话题和关注模块。
 - 引用过的文件。
 - 引用过的 API。
+- 引用过的流程。
 - 回答摘要。
 
 这让“那这个接口在哪里调用？”这类追问可以沿用上一轮上下文。
@@ -85,6 +94,7 @@ Ask 模式已经保存短期会话记忆：
 - `module_summaries`：模块名称、职责、入口文件、Controller / Service / View / API 文件。
 - `file_summaries`：关键文件路径、文件职责、文件角色和符号候选。
 - `api_index`：接口路径、HTTP 方法、后端方法、后端文件和前端调用位置。
+- `symbol_index`：类、方法、函数、组件、接口或类型所在文件。
 - `flow_index`：调用链或登录/auth/API 流程候选。
 
 ### Answer Context
@@ -109,12 +119,14 @@ Ask 模式已经保存短期会话记忆：
 
 Ask 模式选择策略：
 
-1. Intent Classifier 识别 7 类问题意图。
-2. Context Retriever 优先从 Project Memory、Module Summary、File Summary、API Index、Flow Index 和 Session Memory 检索。
-3. Tool Planner 判断上下文是否足够；不足时规划只读工具。
-4. Evidence Collector 调用 `read_file`、`search_keyword`、`parse_dependencies`、`parse_api_calls`、`parse_controller` 等只读工具。
-5. Answer Composer 输出直接回答、相关文件、候选实现路径、关键说明和参考依据。
-6. Memory Updater 写回 Session Memory。
+1. Query Rewriter 结合 Session Memory 处理“这个 / 那个 / 继续”等追问。
+2. Intent Classifier 识别项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈、符号定位和 unknown。
+3. Context Retriever 优先从 Project Memory、Module Summary、File Summary、API Index、Symbol Index、Flow Index 和 Session Memory 检索。
+4. Tool Planner 判断上下文是否足够；凡涉及具体实现、具体文件、具体接口、具体方法或字段的问题都规划只读工具。
+5. Evidence Collector 调用 `read_file`、`search_keyword`、`search_api_path`、`parse_dependencies`、`parse_api_calls`、`parse_controller` 等只读工具，并裁剪为短证据。
+6. Context Builder 构造 `ContextPack`，只放入回答所需项目上下文、会话上下文、索引命中项和代码证据。
+7. Answer Composer 输出直接回答、相关文件、候选实现路径、关键说明和参考依据。
+8. Memory Updater 写回 Session Memory。
 
 ## Context Snapshot 输出
 
@@ -137,6 +149,7 @@ context_snapshot:
 - 文件树需要按目录摘要。
 - 历史消息只保留当前任务相关内容。
 - Repo Map 保留结构化字段，避免反复传入大段自然语言。
+- `ContextPack` 使用字符数近似控制预算，优先级为用户明确提到的文件、会话关注文件、API/Flow 命中文件、模块相关文件和项目摘要。
 
 ## 证据策略
 

@@ -563,7 +563,7 @@ button:disabled {
 }
 
 .manual-list,
-.manual-directory-list {
+.manual-directory-detail {
   display: grid;
   gap: 8px;
 }
@@ -617,12 +617,36 @@ button:disabled {
   gap: 6px;
   align-items: center;
   min-height: 28px;
+  width: 100%;
   border-bottom: 1px solid #eef2f7;
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
+  background: transparent;
+  color: inherit;
   padding-right: 8px;
+  text-align: left;
 }
 
 .tree-row:last-child {
   border-bottom: 0;
+}
+
+.tree-row.selectable {
+  cursor: pointer;
+}
+
+.tree-row.selectable:hover,
+.tree-row.selectable.active {
+  background: #edf4ff;
+}
+
+.tree-row.selectable.active {
+  box-shadow: inset 3px 0 0 #4f83d1;
+}
+
+.tree-row:disabled {
+  cursor: default;
 }
 
 .tree-row span {
@@ -890,6 +914,14 @@ code {
   color: #4f5d73;
   font-size: 12px;
   line-height: 1.45;
+}
+
+.context-note {
+  margin: 8px 0 0;
+  color: #607086;
+  font-size: 11px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }
 
 .ask-composer {

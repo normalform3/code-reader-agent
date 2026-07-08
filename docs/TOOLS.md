@@ -24,6 +24,8 @@ MVP 的工具由 Tool Executor 统一调用，并通过 `/api/agent/run` 的 `to
 - `build_repo_map`
 - `read_file`
 - `search_code`
+- `search_keyword`
+- `search_api_path`
 - `list_files`
 - `search_symbol`
 - `parse_dependencies`
@@ -179,6 +181,26 @@ Phase 4.5 实现：
 - 由 `code_reader_agent.tools.read_only.search_symbol` 提供。
 - 复用 `search_code`，但限制在常见源码文件类型。
 - 用于 Ask 模式在 File Summary 无法定位时补充查找。
+
+### search_keyword
+
+用途：按关键词搜索项目文件，可选粗粒度 scope。
+
+当前实现：
+
+- 由 `code_reader_agent.tools.read_only.search_keyword` 提供。
+- 复用 `search_code` 的安全边界，可按 frontend、backend、config 等 scope 限制常见文件类型。
+- 用于 Ask 模式补充模块、流程和实现细节证据。
+
+### search_api_path
+
+用途：搜索接口路径在哪里定义或调用。
+
+当前实现：
+
+- 由 `code_reader_agent.tools.read_only.search_api_path` 提供。
+- 复用 `search_code`，限制在常见前端、后端和配置文件类型。
+- 用于 Ask 模式的接口定位和调用位置问题。
 
 ### parse_dependencies
 
@@ -344,7 +366,7 @@ Phase 1 最小实现会返回已存在的候选入口文件及其类型，为后
 当前 MVP 实现：
 
 - 由 `code_reader_agent.runtime.analysis.build_project_report` 为 `/api/agent/run` 生成 `report`。
-- 由 `code_reader_agent.runtime.analysis.build_project_manual` 为 `/api/agent/run` 生成 `project_manual`。
+- 由 `code_reader_agent.runtime.analysis.build_project_manual` 为 `/api/agent/run` 生成 `project_manual`；其中 `overview` 可使用 LLM 返回并通过校验的 `project_summary` 覆盖。
 - 报告基于 Repo Map、只读工具调用、evidence、LLM/fallback 输出和 warnings。
 - 即使 LLM 不可用，也必须返回结构化 `ProjectManual` 和 `ProjectReport`。
 - 后续追问通过 `/api/agent/ask` 检索 Project Memory 和 Session Memory；缺少细节时仍通过只读工具补证据。
@@ -391,7 +413,7 @@ Java 项目优先从 Controller mapping、Service 调用、Repository/Mapper 调
 
 `reason` 用于说明为什么调用该工具，例如“用户询问指定文件，需要读取真实代码片段”或“接口问题需要提取前端调用候选”。这些记录需要展示在 Evidence Panel 或 Ask Trace 中。
 
-当前 MVP 中，`/api/agent/run` 会返回紧凑版 `tool_calls` 和 `trace_events`，用于前端展示 `scan_project`、`build_repo_map`、`read_file`、`search_code`、Planner 计划、Context Snapshot 和 Report Writer 输出。
+当前 MVP 中，`/api/agent/run` 会返回紧凑版 `tool_calls` 和 `trace_events`，用于前端展示 `scan_project`、`build_repo_map`、`read_file`、`search_code`、Planner 计划、Context Snapshot 和 Report Writer 输出。`/api/agent/ask` 会额外返回 `tool_plan`、`code_evidence` 和 `context_pack`，用于展示为什么调用只读工具以及哪些证据进入回答上下文。
 
 ## Phase 5.0：LLM 可调用工具白名单
 
@@ -403,6 +425,13 @@ Java 项目优先从 Controller mapping、Service 调用、Repository/Mapper 调
 - `search_code`
 
 这些工具由后端执行，LLM 只提出 tool call 请求。工具结果会回填给 LLM，并同时记录到 `tool_calls` 和 `agent_steps`。
+
+上下文预算熔断：
+
+- 默认 `max_context_chars=24000`，按工具结果 JSON 字符数近似控制 token 消耗。
+- 默认 `max_tool_calls=8`。
+- 默认 `max_read_files=4`。
+- 任一预算超限时，不再把完整工具结果追加给 LLM，返回 deterministic fallback，并在 warnings、agent steps 和 trace events 中记录 `context budget exceeded`。
 
 仍然禁止：
 
