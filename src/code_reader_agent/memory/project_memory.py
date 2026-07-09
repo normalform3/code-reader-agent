@@ -39,13 +39,13 @@ def build_project_memory(repo_map: RepoMap, project_manual: ProjectManual | None
             build_tools=_build_tools(repo_map),
             config_files=_config_files(repo_map),
             external_dependencies=_external_dependencies(repo_map),
-            modules=[item.name for item in repo_map.modules],
+            modules=_memory_module_names(repo_map, project_manual),
             directory_summary=[
                 DirectoryMemorySummary(path=item.path, role=item.role)
                 for item in repo_map.directory_insights[:24]
             ],
         ),
-        module_summaries=_module_summaries(repo_map, api_index),
+        module_summaries=_module_summaries(repo_map, api_index, project_manual),
         file_summaries=_file_summaries(repo_map, api_index),
         api_index=api_index,
     )
@@ -57,6 +57,8 @@ def build_project_memory(repo_map: RepoMap, project_manual: ProjectManual | None
 
 
 def _project_positioning(repo_map: RepoMap, project_manual: ProjectManual | None) -> str:
+    if project_manual and project_manual.manual_overview and project_manual.manual_overview.one_liner:
+        return project_manual.manual_overview.one_liner
     if project_manual and project_manual.overview:
         return project_manual.overview.one_liner
     if repo_map.project_summary:
@@ -65,6 +67,8 @@ def _project_positioning(repo_map: RepoMap, project_manual: ProjectManual | None
 
 
 def _project_description(repo_map: RepoMap, project_manual: ProjectManual | None) -> str:
+    if project_manual and project_manual.manual_overview and project_manual.manual_overview.one_liner:
+        return project_manual.manual_overview.one_liner
     if project_manual and project_manual.overview:
         return project_manual.overview.problem or project_manual.overview.one_liner
     if repo_map.project_summary:
@@ -117,7 +121,27 @@ def _external_dependencies(repo_map: RepoMap) -> list[str]:
     return [name for name in sorted(repo_map.dependencies) if name][:80]
 
 
-def _module_summaries(repo_map: RepoMap, api_index: list[ApiIndexEntry]) -> list[ModuleMemorySummary]:
+def _memory_module_names(repo_map: RepoMap, project_manual: ProjectManual | None) -> list[str]:
+    if project_manual and project_manual.core_modules:
+        return [item.name for item in project_manual.core_modules]
+    return [item.name for item in repo_map.modules]
+
+
+def _module_summaries(
+    repo_map: RepoMap,
+    api_index: list[ApiIndexEntry],
+    project_manual: ProjectManual | None = None,
+) -> list[ModuleMemorySummary]:
+    if project_manual and project_manual.core_modules:
+        return [
+            ModuleMemorySummary(
+                name=module.name,
+                responsibility=module.responsibility,
+                related_files=module.related_files,
+                related_apis=module.api_candidates,
+            )
+            for module in project_manual.core_modules
+        ]
     summaries: list[ModuleMemorySummary] = []
     files_by_path = {item.path: item for item in repo_map.files}
     for module in sorted(repo_map.modules, key=lambda item: (item.reading_priority, item.name)):

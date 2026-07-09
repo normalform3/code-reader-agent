@@ -47,7 +47,7 @@ QueryRewriter
 - Ask 工具必须注册到运行时 Tool Registry，并通过 Tool Executor 执行。Ask 模式只允许 safe read 工具，不写文件、不运行任意 shell、不执行 Git 操作、不联网抓取代码。
 - 工具结果不会全量塞进回答上下文，而是经过 Tool Result Processor 裁剪成 `CodeEvidence` 后进入 `ContextPack`。
 - Skill prompt 只能影响回答组织方式，不能作为事实依据。
-- Answer Composer 会优先使用模型设置中的百炼模型生成自然语言回答；如果缺少 `DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL`、模型调用失败或返回空内容，则降级为确定性模板回答，并在 `warnings` 和 trace 中标记。
+- Answer Composer 会优先使用模型设置中的百炼模型生成自然语言回答；如果缺少 `DASHSCOPE_API_KEY` / `DASHSCOPE_BASE_URL`、模型调用失败或返回空内容，则降级为确定性模板回答，并在 `fallback_reason`、`warnings` 和 trace 中标记原因。
 
 ## 模型设置
 
@@ -89,6 +89,7 @@ Skill 只做三件事：
 - `session_memory`
 - `used_llm`
 - `fallback_used`
+- `fallback_reason`
 - `llm_model`
 
 回答必须尽量包含相关文件路径、候选实现链路和证据说明；如果当前代码中没有明确证据，必须保守说明。

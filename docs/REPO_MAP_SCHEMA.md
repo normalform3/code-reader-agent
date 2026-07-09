@@ -96,14 +96,17 @@ reading_recommendation:
 
 ## Project Manual 结构
 
-`ProjectManual` 不是新的扫描来源。它作为 `/api/agent/run` 的 `project_manual` 返回；报告后的追问优先使用由它和 Repo Map 派生出的 `ProjectMemory`。除 `overview` 外，第一版说明书主体仍由 Repo Map 确定性组装；`overview` 可由 LLM 基于 README 和只读工具上下文生成并覆盖 Repo Map 的确定性基线。
+`ProjectManual` 不是新的扫描来源。它作为 `/api/agent/run` 的 `project_manual` 返回；报告后的追问优先使用由它和 Repo Map 派生出的 `ProjectMemory`。Repo Map 仍负责事实骨架；当 LLM 可用且输出通过校验时，专用 `ProjectManualLLMGenerator` 会生成项目总览、关键目录导航和 Top 核心模块卡片。
 
 ```text
 project_manual:
 - title
 - overview
+- manual_overview
 - technology_stack
+- repo_map
 - modules
+- core_modules
 - entrypoints
 - directory_tree
 - key_directories
@@ -114,12 +117,15 @@ project_manual:
 
 字段说明：
 
-- `overview`：复用 `ProjectSummary`，回答“这是一个什么项目”。优先使用 LLM 校验后的 `project_summary`；LLM 不可用、输出不合法或触发预算熔断时，回退到 `repo_map.project_summary`。
-- `technology_stack`：复用 `StackExplanation`，解释技术栈和项目作用。
-- `modules`：模块作用说明，来自 Repo Map modules。
-- `entrypoints`：入口候选及解释，来自扫描器 entrypoints。
-- `directory_tree`：真实扫描到的文件树截断视图。
-- `key_directories`：关键目录解释，来自 `directory_insights`。
+- `overview`：兼容旧 `ProjectSummary` 字段。
+- `manual_overview`：MVP 说明书总览，包含项目名称、项目类型、一句话介绍、主要技术栈、构建工具、入口候选和成熟度观察。
+- `technology_stack`：复用 `StackExplanation`，作为确定性技术栈 fallback。
+- `repo_map`：关键目录导航，只包含 MVP 需要优先看的目录，不展示完整文件树。
+- `modules`：兼容旧模块字段，限制为优先模块。
+- `core_modules`：Top 5-8 核心模块卡片，包含职责、相关文件、接口候选、识别依据和置信度。
+- `entrypoints`：兼容旧入口候选字段。
+- `directory_tree`：兼容旧字段，不作为 MVP 说明书主体展示。
+- `key_directories`：兼容旧目录解释字段。
 - `evidence`：支撑说明书的文件片段或配置证据。
 - `uncertainties`：证据不足、未运行项目、调用链候选级等限制说明。
 

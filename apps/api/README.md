@@ -19,7 +19,9 @@
 - `POST /api/projects/repo-map`：已实现，接收本地项目路径，返回基础 Repo Map、模块、文件角色、入口、证据和 warnings。
 - `POST /api/agent/project-interpretation`：已实现，接收本地项目路径和问题，返回项目总览、启动建议、推荐阅读路径、prompt payload、证据和 warnings。
 - `POST /api/agent/run`：首次项目理解报告入口，接收内部项目路径和分析目标，返回兼容旧字段以及 `task_id`、`analysis_goal`、`analysis_plan`、`selected_skills`、`context_snapshot`、`project_memory`、`report` 和 `trace_events`。
+- `POST /api/agent/run/stream`：首次项目说明书流式入口，使用 SSE 返回 `step`、`trace`、`final` 和 `error` 事件，`final.event` 是完整 `AgentRunResult`。
 - `POST /api/agent/ask`：报告后的 Ask 模式入口，返回 intent、answer、related files、implementation path、references、tool calls、trace events 和 session memory。
+- `POST /api/agent/ask/stream`：报告后的 Ask 流式入口，使用 SSE 返回公开执行轨迹和最终 Ask 结果。
 
 ## 后续计划接口
 

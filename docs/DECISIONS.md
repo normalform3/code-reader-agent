@@ -290,4 +290,24 @@
 
 选择原因：这种方式既能让说明书的总览、模块职责、入口说明和目录解释更像真实理解结果，又不会允许模型新增未扫描到的结构。所有非法 module id、entrypoint path 或 directory path 都必须进入 warnings，并保留 deterministic fallback。
 
-后续影响：`/api/agent/run` 的 LLM JSON 可以返回 `project_summary` 和 `manual_overrides`；`ProjectManual.generated_by` 必须能区分 LLM 覆盖和 deterministic fallback。后续如果扩大 LLM 覆盖范围，也必须先定义可校验字段和失败降级规则。
+后续影响：旧版通用 Agent Loop 曾允许 LLM JSON 返回 `project_summary` 和 `manual_overrides`；现在说明书生成已拆到专用 structured call。`ProjectManual.generated_by` 必须能区分 LLM 生成和 deterministic fallback，降级时还必须返回 `fallback_reason`。后续如果扩大 LLM 覆盖范围，也必须先定义可校验字段和失败降级规则。
+
+## 为什么把项目说明书生成拆成专用 structured call
+
+日期：2026-07-09
+
+状态：Accepted
+
+背景：项目说明书的目标是导入陌生仓库后的第一屏导航：回答“这是什么项目、代码怎么组织、有哪些核心模块、从哪里开始读”。把它塞进通用 Agent Loop 的最终 JSON 会让说明书和 Ask/分析任务共享一套过宽 prompt，容易出现模型只回答总览、模块卡片仍像硬编码的问题。
+
+备选方案：
+
+- 继续在通用 Agent Loop 中返回 `manual_overrides`。
+- 为说明书新增独立 API。
+- 保持 `/api/agent/run` 入口不变，但后端内部用专用说明书 structured call。
+
+最终选择：保持 `/api/agent/run` 入口不变，但后端内部用专用说明书 structured call。
+
+选择原因：这能保留现有前端和 API 流程，同时让说明书 prompt 聚焦 MVP 三段结构：项目总览、关键目录导航、Top 5-8 核心模块卡片。Repo Map 继续负责事实骨架和白名单校验，LLM 只生成自然语言说明。
+
+后续影响：`ProjectManualLLMGenerator` 负责说明书生成；通用 Agent Loop 不再包含说明书专属 prompt、`manual_overrides` 或 `project_manual_generation_context`。Ask 模式只消费 Project Memory 和只读工具，不复用说明书生成 prompt。说明书或 Ask 降级时，API 必须返回 `fallback_reason`，前端必须直接展示原因。

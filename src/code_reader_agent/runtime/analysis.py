@@ -16,7 +16,10 @@ from code_reader_agent.models import (
     ProjectManual,
     ProjectManualDirectory,
     ProjectManualEntrypoint,
+    ProjectManualCoreModule,
     ProjectManualModule,
+    ProjectManualOverview,
+    ProjectManualRepoMapItem,
     ProjectReport,
     ProjectSummary,
     ReadingPathItem,
@@ -46,9 +49,11 @@ def enrich_agent_run_result(
     used_llm: bool,
     fallback_used: bool,
     fallback_result: ProjectInterpretationResult | None,
+    fallback_reason: str | None = None,
     project_manual_context: ProjectManual | None = None,
     overview_override: ProjectSummary | None = None,
     manual_overrides: dict[str, Any] | None = None,
+    project_manual_override: ProjectManual | None = None,
 ) -> AgentRunResult:
     """Attach plan, skills, context, report, and trace to an agent run."""
 
@@ -58,12 +63,16 @@ def enrich_agent_run_result(
     selected_skills = select_skills(repo_map)
     analysis_goal = build_analysis_goal(question)
     analysis_plan = build_analysis_plan(question, repo_map, selected_skills)
-    project_manual, manual_warnings = build_project_manual_with_warnings(
-        repo_map,
-        overview_override=overview_override,
-        manual_overrides=manual_overrides,
-        generated_by=_manual_generated_by(used_llm, fallback_used, overview_override, manual_overrides),
-    )
+    if project_manual_override is None:
+        project_manual, manual_warnings = build_project_manual_with_warnings(
+            repo_map,
+            overview_override=overview_override,
+            manual_overrides=manual_overrides,
+            generated_by=_manual_generated_by(used_llm, fallback_used, overview_override, manual_overrides),
+        )
+    else:
+        project_manual = project_manual_override
+        manual_warnings = []
     warnings = _dedupe_strings([*warnings, *manual_warnings])
     project_memory = build_project_memory(repo_map, project_manual)
     context_snapshot = build_context_snapshot(
@@ -116,6 +125,7 @@ def enrich_agent_run_result(
         agent_steps=agent_steps,
         used_llm=used_llm,
         fallback_used=fallback_used,
+        fallback_reason=fallback_reason or (_first_warning(warnings) if fallback_used else None),
         fallback_result=fallback_result,
     )
 
@@ -288,7 +298,17 @@ def build_project_manual_with_warnings(
     manual = ProjectManual(
         title=f"{repo_map.project_name} 项目说明书",
         overview=overview_override or repo_map.project_summary,
+        manual_overview=_build_manual_overview(repo_map, overview_override),
         technology_stack=repo_map.stack_explanations[:12],
+        repo_map=[
+            ProjectManualRepoMapItem(
+                path=directory.path,
+                role=directory.role,
+                importance=directory.importance,
+                reason=directory.reason,
+            )
+            for directory in repo_map.directory_insights[:10]
+        ],
         modules=[
             ProjectManualModule(
                 id=module.id,
@@ -297,9 +317,24 @@ def build_project_manual_with_warnings(
                 responsibility=module.responsibility,
                 key_files=module.key_files,
                 entry_files=module.entry_files,
+                related_files=_dedupe_strings([*module.entry_files, *module.key_files])[:8],
+                api_candidates=_api_candidates_for_module(repo_map, module.id)[:6],
+                identification_basis=_module_identification_basis(module),
                 confidence=module.confidence,
             )
-            for module in sorted(repo_map.modules, key=lambda item: (item.reading_priority, item.name))[:12]
+            for module in sorted(repo_map.modules, key=lambda item: (item.reading_priority, item.name))[:8]
+        ],
+        core_modules=[
+            ProjectManualCoreModule(
+                id=module.id,
+                name=module.name,
+                responsibility=module.responsibility,
+                related_files=_dedupe_strings([*module.entry_files, *module.key_files])[:8],
+                api_candidates=_api_candidates_for_module(repo_map, module.id)[:6],
+                identification_basis=_module_identification_basis(module),
+                confidence=module.confidence,
+            )
+            for module in sorted(repo_map.modules, key=lambda item: (item.reading_priority, item.name))[:8]
         ],
         entrypoints=[
             ProjectManualEntrypoint(
@@ -328,6 +363,19 @@ def build_project_manual_with_warnings(
     if override_warnings:
         manual.uncertainties = _dedupe_strings([*manual.uncertainties, *override_warnings])
     return manual, override_warnings
+
+
+def _build_manual_overview(repo_map: RepoMap, overview_override: ProjectSummary | None = None) -> ProjectManualOverview:
+    summary = overview_override or repo_map.project_summary
+    return ProjectManualOverview(
+        project_name=repo_map.project_name,
+        project_type=_project_type(repo_map),
+        one_liner=summary.one_liner if summary else f"{repo_map.project_name} 是一个待进一步确认的代码仓库。",
+        main_stack=[item.name for item in repo_map.stack_explanations[:8]],
+        build_tools=_build_tools(repo_map),
+        entrypoints=[entry.path for entry in repo_map.entrypoints[:6]],
+        maturity_observations=_maturity_observations(repo_map),
+    )
 
 
 def build_project_report(
@@ -448,6 +496,78 @@ def build_trace_events(
         )
     )
     return events
+
+
+def _project_type(repo_map: RepoMap) -> str:
+    stack_names = {item.name.lower() for item in repo_map.detected_stack}
+    has_frontend = bool(stack_names & {"vue", "vite", "react", "next.js"} or repo_map.components)
+    has_backend = bool(
+        stack_names & {"spring boot", "spring", "fastapi", "express"}
+        or repo_map.controllers
+        or repo_map.services
+        or repo_map.repositories
+    )
+    if has_frontend and has_backend:
+        return "前后端分离"
+    if has_frontend:
+        return "前端"
+    if has_backend:
+        return "后端"
+    if repo_map.package_manager and not has_frontend:
+        return "工具库 / CLI"
+    return "多模块项目" if len(repo_map.modules) > 3 else "待确认项目"
+
+
+def _build_tools(repo_map: RepoMap) -> list[str]:
+    tools: list[str] = []
+    if repo_map.java_build_tool:
+        tools.append(repo_map.java_build_tool)
+    if repo_map.package_manager:
+        tools.append(repo_map.package_manager)
+    if any(item.name == "Vite" for item in repo_map.stack_explanations):
+        tools.append("Vite")
+    return _dedupe_strings(tools)
+
+
+def _maturity_observations(repo_map: RepoMap) -> list[str]:
+    paths = {entry.path for entry in repo_map.file_tree}
+    lower_paths = {path.lower() for path in paths}
+    observations = [
+        "包含 README" if any(path.startswith("readme") for path in lower_paths) else "未发现 README",
+        "包含测试目录或测试文件"
+        if any("test" in path or "spec" in path for path in lower_paths)
+        else "未明显发现测试",
+        "包含 Docker 配置"
+        if any("dockerfile" in path or "docker-compose" in path for path in lower_paths)
+        else "未发现 Docker 配置",
+        "包含 CI 配置"
+        if any(path.startswith(".github/workflows") or path.startswith(".gitlab-ci") for path in lower_paths)
+        else "未发现 CI 配置",
+    ]
+    if repo_map.run_scripts:
+        observations.append("包含 package scripts")
+    if repo_map.java_build_tool:
+        observations.append(f"包含 {repo_map.java_build_tool} 构建配置")
+    return observations
+
+
+def _api_candidates_for_module(repo_map: RepoMap, module_id: str) -> list[str]:
+    lowered = module_id.lower()
+    if "auth" in lowered or "login" in lowered:
+        return repo_map.auth_flows[:6] or [item for item in repo_map.api_endpoints if "auth" in item.lower() or "login" in item.lower()][:6]
+    if "controller" in lowered or "api" in lowered:
+        return repo_map.api_endpoints[:6]
+    return []
+
+
+def _module_identification_basis(module: Any) -> str:
+    evidence = ", ".join(module.evidence[:3]) if getattr(module, "evidence", None) else ""
+    files = ", ".join(_dedupe_strings([*module.entry_files, *module.key_files])[:3])
+    if evidence and files:
+        return f"根据模块命名、相关文件 {files} 以及证据 {evidence} 识别。"
+    if files:
+        return f"根据相关文件 {files} 和目录结构识别。"
+    return "根据 Repo Map 的模块分组和扫描线索识别。"
 
 
 def _reading_route(repo_map: RepoMap, fallback_result: ProjectInterpretationResult | None) -> list[ReadingPathItem]:
@@ -592,6 +712,13 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(value)
         unique.append(value)
     return unique
+
+
+def _first_warning(warnings: list[str]) -> str | None:
+    for warning in warnings:
+        if warning:
+            return warning
+    return None
 
 
 def _skill_trace_summary(selected_skills: list[str], active_skills: list[ActiveSkillInfo]) -> str:

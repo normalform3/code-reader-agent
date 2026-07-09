@@ -302,22 +302,75 @@ def run_agent_api(request: AgentRunRequest) -> AgentRunResult:
     """Run the minimal read-only LLM agent loop with deterministic fallback."""
 
     try:
-        result = run_agent_loop(
-            request.project_path,
-            request.question,
-            request.max_steps,
-            max_context_chars=request.max_context_chars,
-            max_tool_calls=request.max_tool_calls,
-            max_read_files=request.max_read_files,
-            project_manual_context=request.project_manual_context,
-        )
-        if result.project_memory:
-            save_project_memory(result.project_memory)
-        return result
+        return _run_agent_request(request)
     except ProjectScanError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LocalStateError as exc:
         raise _state_http_error(exc) from exc
+
+
+@app.post("/api/agent/run/stream")
+def run_agent_stream_api(request: AgentRunRequest) -> StreamingResponse:
+    """Stream project-manual analysis progress events and final result as SSE."""
+
+    def event_stream():
+        try:
+            yield _sse_event(
+                "step",
+                {
+                    "type": "step",
+                    "node": "Agent Runtime",
+                    "event": {"title": "Create analysis task", "summary": "已创建只读项目说明书分析任务。", "status": "success"},
+                },
+            )
+            scan = scan_project(request.project_path)
+            yield _sse_event(
+                "step",
+                {
+                    "type": "step",
+                    "node": "Scanner",
+                    "event": {
+                        "title": "scan_project",
+                        "summary": f"扫描到 {len(scan.file_tree)} 个文件树条目和 {len(scan.entrypoints)} 个入口候选。",
+                        "status": "success",
+                    },
+                },
+            )
+            repo_map = build_repo_map(scan)
+            yield _sse_event(
+                "step",
+                {
+                    "type": "step",
+                    "node": "Repo Map Builder",
+                    "event": {
+                        "title": "build_repo_map",
+                        "summary": f"生成 {len(repo_map.modules)} 个模块、{len(repo_map.evidence)} 条 evidence。",
+                        "status": "success",
+                    },
+                },
+            )
+            yield _sse_event(
+                "step",
+                {
+                    "type": "step",
+                    "node": "Project Manual",
+                    "event": {"title": "generate_project_manual", "summary": "正在生成项目总览、关键目录和核心模块卡片。", "status": "success"},
+                },
+            )
+            result = _run_agent_request(request)
+            for event in result.trace_events:
+                yield _sse_event("trace", {"type": "trace", "node": event.stage, "event": event.model_dump()})
+            yield _sse_event("final", {"type": "final", "event": result.model_dump()})
+        except (ProjectScanError, LocalStateError) as exc:
+            yield _sse_event("error", {"type": "error", "error": str(exc)})
+        except Exception as exc:
+            yield _sse_event("error", {"type": "error", "error": f"Agent run stream failed: {exc}"})
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.post("/api/agent/ask", response_model=AskModeResult)
@@ -365,6 +418,23 @@ def _state_http_error(exc: LocalStateError) -> HTTPException:
     if "not found" in message:
         return HTTPException(status_code=404, detail=message)
     return HTTPException(status_code=500, detail=message)
+
+
+def _run_agent_request(request: AgentRunRequest) -> AgentRunResult:
+    settings = get_model_settings()
+    result = run_agent_loop(
+        request.project_path,
+        request.question,
+        request.max_steps,
+        max_context_chars=request.max_context_chars,
+        max_tool_calls=request.max_tool_calls,
+        max_read_files=request.max_read_files,
+        llm_client=LiteLLMClient(model=settings.model),
+        project_manual_context=request.project_manual_context,
+    )
+    if result.project_memory:
+        save_project_memory(result.project_memory)
+    return result
 
 
 def _sse_event(event: str, payload: dict[str, object]) -> str:

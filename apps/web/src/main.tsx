@@ -177,6 +177,9 @@ type ProjectManualModule = {
   responsibility: string;
   key_files: string[];
   entry_files: string[];
+  related_files: string[];
+  api_candidates: string[];
+  identification_basis: string;
   confidence: number;
 };
 
@@ -194,11 +197,41 @@ type ProjectManualDirectory = {
   reason: string;
 };
 
+type ProjectManualOverview = {
+  project_name: string;
+  project_type: string;
+  one_liner: string;
+  main_stack: string[];
+  build_tools: string[];
+  entrypoints: string[];
+  maturity_observations: string[];
+};
+
+type ProjectManualRepoMapItem = {
+  path: string;
+  role: string;
+  reason: string;
+  importance: "core" | "supporting" | "skippable";
+};
+
+type ProjectManualCoreModule = {
+  id: string;
+  name: string;
+  responsibility: string;
+  related_files: string[];
+  api_candidates: string[];
+  identification_basis: string;
+  confidence: number;
+};
+
 type ProjectManual = {
   title: string;
   overview: ProjectSummary | null;
+  manual_overview: ProjectManualOverview | null;
   technology_stack: StackExplanation[];
+  repo_map: ProjectManualRepoMapItem[];
   modules: ProjectManualModule[];
+  core_modules: ProjectManualCoreModule[];
   entrypoints: ProjectManualEntrypoint[];
   directory_tree: FileTreeEntry[];
   key_directories: ProjectManualDirectory[];
@@ -236,6 +269,7 @@ type Interpretation = {
   final_answer?: string;
   used_llm?: boolean;
   fallback_used?: boolean;
+  fallback_reason?: string | null;
   reading_path?: ReadingPathItem[];
   evidence: EvidenceRef[];
   tool_calls: Array<{
@@ -406,6 +440,7 @@ type AskModeResult = {
   warnings: string[];
   used_llm: boolean;
   fallback_used: boolean;
+  fallback_reason: string | null;
   llm_model: string | null;
 };
 
@@ -421,6 +456,19 @@ type AskStreamEvent =
   | { type: "tool_result"; node?: string; event?: AskModeResult["tool_calls"][number] }
   | { type: "answer"; node?: string; event?: { answer?: string }; answer?: string }
   | { type: "final"; event?: AskModeResult }
+  | { type: "error"; error?: string };
+
+type AgentRunStreamStep = {
+  title?: string;
+  summary?: string;
+  status?: "success" | "error";
+  tool_name?: string | null;
+};
+
+type AgentRunStreamEvent =
+  | { type: "step"; node?: string; event?: AgentRunStreamStep }
+  | { type: "trace"; node?: string; event?: TraceEvent }
+  | { type: "final"; event?: Interpretation }
   | { type: "error"; error?: string };
 
 type ModelSettingsStatus = {
@@ -499,7 +547,7 @@ type FileTreeNode = FileTreeEntry & {
   children: FileTreeNode[];
 };
 
-const DEFAULT_QUESTION = "请先为这个仓库生成项目说明书：这个项目是什么、主要做什么？用了什么技术栈？有哪些模块和入口？请给出真实目录树，目录解释只需要到模块级。";
+const DEFAULT_QUESTION = "请先为这个仓库生成项目说明书：这个项目是什么、主要做什么？用了什么技术栈和构建工具？有哪些关键目录？请给出代码库总览和关键目录导航。";
 
 function App() {
   const [registryModal, setRegistryModal] = useState<RegistryKind | null>(null);
@@ -519,7 +567,8 @@ function App() {
   const [askResult, setAskResult] = useState<AskModeResult | null>(null);
   const [askSessionMemory, setAskSessionMemory] = useState<SessionMemory | null>(null);
   const [projectManual, setProjectManual] = useState<ProjectManual | null>(null);
-  const [selectedModuleId, setSelectedModuleId] = useState<string | null>(null);
+  const [manualTraceEvents, setManualTraceEvents] = useState<TraceEvent[]>([]);
+  const [manualTraceStreaming, setManualTraceStreaming] = useState(false);
   const [status, setStatus] = useState<Status>("empty");
   const [error, setError] = useState<string | null>(null);
 
@@ -541,7 +590,11 @@ function App() {
     }
   }
 
-  async function analyzeProject(nextProjectPath: string, nextQuestion = DEFAULT_QUESTION) {
+  async function analyzeProject(
+    nextProjectPath: string,
+    nextQuestion = DEFAULT_QUESTION,
+    onStreamEvent?: (event: AgentRunStreamEvent) => void,
+  ) {
     setStatus("loading");
     setError(null);
     setInterpretation(null);
@@ -550,15 +603,14 @@ function App() {
 
     const [repoMapResult, interpretationResult] = await Promise.all([
       postJson<RepoMap>("/api/projects/repo-map", { project_path: nextProjectPath }),
-      postJson<Interpretation>("/api/agent/run", {
+      postAgentRunStream({
         project_path: nextProjectPath,
         question: nextQuestion,
-      }),
+      }, onStreamEvent),
     ]);
     setRepoMap(repoMapResult);
     setInterpretation(interpretationResult);
     setProjectManual(interpretationResult.project_manual ?? null);
-    setSelectedModuleId(repoMapResult.modules[0]?.id ?? null);
     setSidebarView("files");
     setStatus("ready");
     return { repoMapResult, interpretationResult };
@@ -580,7 +632,8 @@ function App() {
     setAskSessionMemory(null);
     setProjectManual(null);
     setAskMessages([]);
-    setSelectedModuleId(null);
+    setManualTraceEvents([]);
+    setManualTraceStreaming(false);
     setGithubImport(null);
 
     try {
@@ -589,18 +642,13 @@ function App() {
       });
       setGithubImport(importedProject);
       const analysisQuestion = question.trim() || DEFAULT_QUESTION;
-      const { repoMapResult, interpretationResult } = await analyzeProject(importedProject.project_path, analysisQuestion);
-      setAskMessages([
-        {
-          id: `${Date.now()}-manual`,
-          role: "assistant",
-          body:
-            interpretationText(interpretationResult.project_manual?.overview?.one_liner) ||
-            interpretationText(repoMapResult.project_summary?.one_liner) ||
-            `${repoMapResult.project_name} 的项目说明书已生成，可以继续在右侧追问。`,
-          meta: "项目说明书",
-        },
-      ]);
+      setManualTraceEvents([]);
+      setManualTraceStreaming(true);
+      const { repoMapResult, interpretationResult } = await analyzeProject(importedProject.project_path, analysisQuestion, (event) => {
+        updateManualTraceFromStream(event);
+      });
+      setManualTraceEvents((current) => (interpretationResult.trace_events?.length ? interpretationResult.trace_events : current));
+      setManualTraceStreaming(false);
       const session = await postJson<ProjectSession>("/api/projects/history", {
         project_name: repoMapResult.project_name,
         project_path: importedProject.project_path,
@@ -616,6 +664,7 @@ function App() {
       const message = caught instanceof Error ? caught.message : "导入或分析失败，请检查 GitHub 链接和本地 API。";
       setError(message);
       setStatus("error");
+      setManualTraceStreaming(false);
     }
   }
 
@@ -624,20 +673,17 @@ function App() {
     setGithubImport(null);
     setGithubUrl(session.github_url ?? "");
     setQuestion("");
+    setAskMessages([]);
+    setAskSessionMemory(null);
+    setManualTraceEvents([]);
+    setManualTraceStreaming(true);
     setSidebarView("files");
     try {
-      const { repoMapResult, interpretationResult } = await analyzeProject(session.project_path, DEFAULT_QUESTION);
-      setAskMessages([
-        {
-          id: `${Date.now()}-restore`,
-          role: "assistant",
-          body:
-            interpretationText(interpretationResult.report?.project_map) ||
-            interpretationText(interpretationResult.final_answer) ||
-            `${repoMapResult.project_name} 已恢复，项目文件树和说明书已刷新。`,
-          meta: "历史项目",
-        },
-      ]);
+      const { interpretationResult } = await analyzeProject(session.project_path, DEFAULT_QUESTION, (event) => {
+        updateManualTraceFromStream(event);
+      });
+      setManualTraceEvents((current) => (interpretationResult.trace_events?.length ? interpretationResult.trace_events : current));
+      setManualTraceStreaming(false);
       await patchJson<ProjectSession>(`/api/projects/history/${session.id}`, {
           status: "ready",
           last_question: session.last_question,
@@ -648,6 +694,7 @@ function App() {
       const message = caught instanceof Error ? caught.message : "恢复历史项目失败。";
       setError(message);
       setStatus("error");
+      setManualTraceStreaming(false);
       await patchJson<ProjectSession>(`/api/projects/history/${session.id}`, {
         status: "error",
         last_error: message,
@@ -666,6 +713,8 @@ function App() {
       setAskSessionMemory(null);
       setProjectManual(null);
       setAskMessages([]);
+      setManualTraceEvents([]);
+      setManualTraceStreaming(false);
       setProjectPath("");
       setStatus("empty");
     }
@@ -801,6 +850,38 @@ function App() {
     }
   }
 
+  function updateManualTraceFromStream(event: AgentRunStreamEvent) {
+    setManualTraceEvents((current) => {
+      if (event.type === "trace" && event.event) {
+        return [...current, event.event];
+      }
+      if (event.type === "step" && event.event) {
+        const traceEvent: TraceEvent = {
+          index: current.length + 1,
+          stage: event.node ?? "Agent Runtime",
+          title: event.event.title ?? event.node ?? "Agent step",
+          summary: event.event.summary ?? "Agent 正在生成项目说明书。",
+          status: event.event.status ?? "success",
+          tool_name: event.event.tool_name ?? null,
+        };
+        return [...current, traceEvent];
+      }
+      if (event.type === "error") {
+        const traceEvent: TraceEvent = {
+          index: current.length + 1,
+          stage: "Agent Runtime",
+          title: "Stream error",
+          summary: event.error ?? "项目说明书生成失败。",
+          status: "error",
+          tool_name: null,
+        };
+        setManualTraceStreaming(false);
+        return [...current, traceEvent];
+      }
+      return current;
+    });
+  }
+
   return (
     <main className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
       <Sidebar
@@ -829,14 +910,14 @@ function App() {
         error={error}
         githubImport={githubImport}
         interpretation={interpretation}
+        manualTraceEvents={manualTraceEvents}
+        manualTraceStreaming={manualTraceStreaming}
         onAsk={handleAsk}
-        onSelectModule={setSelectedModuleId}
         onSetQuestion={setQuestion}
         onToggleAskExpanded={() => setAskExpanded((current) => !current)}
         projectManual={projectManual}
         question={question}
         repoMap={repoMap}
-        selectedModuleId={selectedModuleId}
         status={status}
       />
 
@@ -1045,14 +1126,14 @@ function ProjectWorkspace({
   error,
   githubImport,
   interpretation,
+  manualTraceEvents,
+  manualTraceStreaming,
   onAsk,
-  onSelectModule,
   onSetQuestion,
   onToggleAskExpanded,
   projectManual,
   question,
   repoMap,
-  selectedModuleId,
   status,
 }: {
   activeSession: ProjectSession | null;
@@ -1062,35 +1143,16 @@ function ProjectWorkspace({
   error: string | null;
   githubImport: GitHubImportResult | null;
   interpretation: Interpretation | null;
+  manualTraceEvents: TraceEvent[];
+  manualTraceStreaming: boolean;
   onAsk: () => void;
-  onSelectModule: (moduleId: string) => void;
   onSetQuestion: (question: string) => void;
   onToggleAskExpanded: () => void;
   projectManual: ProjectManual | null;
   question: string;
   repoMap: RepoMap | null;
-  selectedModuleId: string | null;
   status: Status;
 }) {
-  const selectedModule = useMemo(() => {
-    if (!repoMap) {
-      return null;
-    }
-    return repoMap.modules.find((module) => module.id === selectedModuleId) ?? repoMap.modules[0] ?? null;
-  }, [repoMap, selectedModuleId]);
-
-  const evidenceById = useMemo(() => {
-    return new Map(repoMap?.evidence.map((item) => [item.id, item]) ?? []);
-  }, [repoMap]);
-
-  const selectedModuleFiles = useMemo(() => {
-    if (!repoMap || !selectedModule) {
-      return [];
-    }
-    const fileSet = new Set(selectedModule.key_files);
-    return repoMap.files.filter((file) => fileSet.has(file.path));
-  }, [repoMap, selectedModule]);
-
   const statusLabel: Record<Status, string> = {
     empty: "未扫描",
     importing: "下载中",
@@ -1098,14 +1160,30 @@ function ProjectWorkspace({
     ready: "已完成",
     error: "出错",
   };
-  const manualOverview = projectManual?.overview ?? repoMap?.project_summary ?? null;
+  const manualOverview = projectManual?.manual_overview ?? null;
+  const summaryOverview = projectManual?.overview ?? repoMap?.project_summary ?? null;
+  const mainStack = manualOverview?.main_stack.length
+    ? manualOverview.main_stack
+    : projectManual?.technology_stack.length
+      ? projectManual.technology_stack.map((item) => item.name)
+      : repoMap?.detected_stack.map((item) => item.name) ?? [];
+  const buildTools = manualOverview?.build_tools.length
+    ? manualOverview.build_tools
+    : [repoMap?.package_manager, repoMap?.java_build_tool].filter(isPresent);
+  const entrypoints = manualOverview?.entrypoints.length
+    ? manualOverview.entrypoints
+    : projectManual?.entrypoints.length
+      ? projectManual.entrypoints.map((item) => item.path)
+      : repoMap?.entrypoints.filter((item) => item.exists).map((item) => item.path) ?? [];
+  const interpretationFallbackReason =
+    interpretation?.fallback_reason ?? (interpretation?.fallback_used ? interpretation.warnings?.[0] ?? null : null);
 
   return (
     <section className={askExpanded ? "workspace-shell ask-expanded" : "workspace-shell"}>
       {!askExpanded ? <section className="map-panel">
         <header className="workspace-header">
           <div>
-            <p className="kicker">Project Session</p>
+            <p className="kicker">项目说明书</p>
             <h2>{repoMap?.project_name ?? activeSession?.title ?? "输入公开 GitHub 仓库链接"}</h2>
             <span>{githubImport?.github_url ?? activeSession?.github_url ?? "像会话一样保存每个项目的分析历史。"}</span>
           </div>
@@ -1114,6 +1192,8 @@ function ProjectWorkspace({
           </div>
         </header>
 
+        <ManualTracePanel events={manualTraceEvents} streaming={manualTraceStreaming} />
+
         {error ? <div className="error-box">{error}</div> : null}
 
         <section className="overview-panel">
@@ -1121,85 +1201,52 @@ function ProjectWorkspace({
             <div className="detail-heading">
               <div>
                 <p className="kicker">代码库总览</p>
-                <h3>{manualOverview?.one_liner ?? "扫描完成后生成项目概述"}</h3>
+                <h3>{manualOverview?.one_liner ?? summaryOverview?.one_liner ?? "扫描完成后生成项目概述"}</h3>
               </div>
-              {manualOverview ? <span>{Math.round(manualOverview.confidence * 100)}% 置信度</span> : null}
+              {summaryOverview ? <span>{Math.round(summaryOverview.confidence * 100)}% 置信度</span> : null}
             </div>
             <div className="summary-grid">
               <div>
                 <strong>这个项目是什么</strong>
-                <p>{manualOverview?.audience ?? "等待 README、配置和入口文件证据。"}</p>
+                <p>{summaryOverview?.audience ?? manualOverview?.project_type ?? "等待 README、配置和入口文件证据。"}</p>
               </div>
               <div>
                 <strong>主要做什么</strong>
-                <p>{manualOverview?.problem ?? "证据不足时会明确提示低置信度。"}</p>
+                <p>{summaryOverview?.problem ?? manualOverview?.one_liner ?? "证据不足时会明确提示低置信度。"}</p>
               </div>
             </div>
+            <div className="manual-facts">
+              <div>
+                <span>项目类型</span>
+                <strong>{manualOverview?.project_type || "待确认项目"}</strong>
+              </div>
+              <div>
+                <span>主要技术栈</span>
+                <strong>{mainStack.slice(0, 6).join(" / ") || "未识别"}</strong>
+              </div>
+              <div>
+                <span>构建工具</span>
+                <strong>{buildTools.slice(0, 4).join(" / ") || "未识别"}</strong>
+              </div>
+              <div>
+                <span>入口候选</span>
+                <strong>{entrypoints.slice(0, 3).join(" / ") || "暂无"}</strong>
+              </div>
+            </div>
+            {manualOverview?.maturity_observations.length ? (
+              <div className="manual-tags">
+                {manualOverview.maturity_observations.slice(0, 6).map((item) => (
+                  <span key={item}>{item}</span>
+                ))}
+              </div>
+            ) : null}
+            {interpretationFallbackReason ? (
+              <span className="warning-note">LLM 降级原因：{interpretationFallbackReason}</span>
+            ) : null}
           </div>
 
           <ProjectManualCard manual={projectManual} />
         </section>
-
-        <div className="module-grid">
-          {repoMap?.modules
-            .slice()
-            .sort((left, right) => left.reading_priority - right.reading_priority || left.name.localeCompare(right.name))
-            .map((module) => (
-              <button
-                className={module.id === selectedModule?.id ? "module-card active" : "module-card"}
-                key={module.id}
-                onClick={() => onSelectModule(module.id)}
-                type="button"
-              >
-                <span>{module.type}</span>
-                <strong>{module.name}</strong>
-                <small>
-                  优先级 {module.reading_priority} · {module.key_files.length} 个核心文件
-                </small>
-                <p>{module.responsibility}</p>
-              </button>
-            )) ?? <EmptyState title="暂无模块" body="扫描项目后，将生成确定性的模块地图。" />}
-        </div>
-
-        <div className="detail-panel">
-          {selectedModule ? (
-            <>
-              <div className="detail-heading">
-                <div>
-                  <p className="kicker">当前模块</p>
-                  <h3>{selectedModule.name}</h3>
-                </div>
-                <span>{Math.round(selectedModule.confidence * 100)}% 置信度</span>
-              </div>
-              <p>{selectedModule.responsibility}</p>
-              <div className="file-table">
-                {selectedModuleFiles.map((file) => (
-                  <div className="file-row with-meta" key={file.path}>
-                    <code>{file.path}</code>
-                    <span>
-                      {file.role}
-                      {file.language ? ` · ${file.language}` : ""}
-                      {file.framework ? ` · ${file.framework}` : ""}
-                    </span>
-                  </div>
-                ))}
-              </div>
-              <div className="evidence-snippets">
-                <h4>模块证据</h4>
-                {selectedModule.evidence.length > 0 ? (
-                  selectedModule.evidence.map((evidenceId) => {
-                    const evidence = evidenceById.get(evidenceId);
-                    return evidence ? <EvidenceSnippet evidence={evidence} key={evidence.id} /> : null;
-                  })
-                ) : (
-                  <p className="muted">该模块目前只有路径规则推断，暂无片段证据。</p>
-                )}
-              </div>
-            </>
-          ) : (
-            <EmptyState title="模块详情" body="模块证据和关键文件会显示在这里。" />
-          )}
-        </div>
       </section> : null}
 
       <button
@@ -1223,6 +1270,47 @@ function ProjectWorkspace({
         status={status}
       />
     </section>
+  );
+}
+
+function ManualTracePanel({ events, streaming }: { events: TraceEvent[]; streaming: boolean }) {
+  const [open, setOpen] = useState(streaming);
+
+  useEffect(() => {
+    if (streaming) {
+      setOpen(true);
+    }
+  }, [streaming]);
+
+  if (!streaming && events.length === 0) {
+    return null;
+  }
+
+  const latest = events[events.length - 1];
+  return (
+    <details className="manual-trace-panel" open={open} onToggle={(event) => setOpen(event.currentTarget.open)}>
+      <summary>
+        <div>
+          <p className="kicker">生成流程</p>
+          <strong>{latest?.summary ?? "Agent 正在创建项目说明书分析任务..."}</strong>
+        </div>
+        <span>{streaming ? "流式生成中" : `${events.length} 步`}</span>
+      </summary>
+      <div className="manual-trace-list">
+        {events.length > 0 ? (
+          events.map((event) => (
+            <div className="manual-trace-row" data-status={event.status} key={`${event.index}-${event.stage}-${event.title}`}>
+              <span>{event.stage}</span>
+              <strong>{event.title}</strong>
+              <small>{event.summary}</small>
+            </div>
+          ))
+        ) : (
+          <span className="muted">等待后端返回扫描、Repo Map 和 Report Writer 进度。</span>
+        )}
+        {streaming ? <em>持续接收 Agent 进度...</em> : null}
+      </div>
+    </details>
   );
 }
 
@@ -1250,6 +1338,9 @@ function AgentPanel({
     interpretation?.final_answer ??
     interpretation?.overview ??
     "导入项目后，右侧会保留 Ask 对话；项目说明书固定展示在中间主区。";
+  const askFallbackReason = askResult?.fallback_reason ?? (askResult?.fallback_used ? askResult.warnings[0] ?? null : null);
+  const interpretationFallbackReason =
+    interpretation?.fallback_reason ?? (interpretation?.fallback_used ? interpretation.warnings?.[0] ?? null : null);
   return (
     <aside className="agent-panel">
       <header className="ask-header">
@@ -1290,7 +1381,10 @@ function AgentPanel({
               <p>{latestAnswer}</p>
             </article>
           )}
-          {interpretation?.fallback_used ? <span className="warning-note">LLM Agent 已降级为确定性解释。</span> : null}
+          {askFallbackReason ? <span className="warning-note">Ask 降级原因：{askFallbackReason}</span> : null}
+          {!askFallbackReason && interpretationFallbackReason ? (
+            <span className="warning-note">项目说明书降级原因：{interpretationFallbackReason}</span>
+          ) : null}
         </div>
 
         <div className="ask-context">
@@ -1506,27 +1600,6 @@ function StatusTile({ label, value, ok }: { label: string; value: string; ok: bo
 }
 
 function ProjectManualCard({ manual }: { manual: ProjectManual | null }) {
-  const moduleDirectories = useMemo(() => {
-    return manual?.key_directories.filter(isModuleLevelDirectoryInsight) ?? [];
-  }, [manual]);
-  const [selectedDirectoryPath, setSelectedDirectoryPath] = useState<string | null>(null);
-  const directoryByPath = useMemo(() => {
-    return new Map(moduleDirectories.map((directory) => [directory.path, directory]));
-  }, [moduleDirectories]);
-  const selectedDirectory =
-    (selectedDirectoryPath ? directoryByPath.get(selectedDirectoryPath) : null) ?? moduleDirectories[0] ?? null;
-
-  useEffect(() => {
-    if (!manual) {
-      setSelectedDirectoryPath(null);
-      return;
-    }
-    if (selectedDirectoryPath && directoryByPath.has(selectedDirectoryPath)) {
-      return;
-    }
-    setSelectedDirectoryPath(moduleDirectories[0]?.path ?? null);
-  }, [directoryByPath, manual, moduleDirectories, selectedDirectoryPath]);
-
   if (!manual) {
     return (
       <div className="manual-card">
@@ -1536,10 +1609,22 @@ function ProjectManualCard({ manual }: { manual: ProjectManual | null }) {
             <h3>等待首次扫描生成说明书</h3>
           </div>
         </div>
-        <p className="muted">导入项目后，Agent 会先生成总览、技术栈、模块、入口和真实目录树解释。</p>
+        <p className="muted">导入项目后，Agent 会先生成代码库总览和关键目录导航。</p>
       </div>
     );
   }
+
+  const manualRepoMap = manual.repo_map ?? [];
+  const manualKeyDirectories = manual.key_directories ?? [];
+  const repoMapItems =
+    manualRepoMap.length > 0
+      ? manualRepoMap
+      : manualKeyDirectories.slice(0, 10).map((directory) => ({
+          path: directory.path,
+          role: directory.role,
+          reason: directory.reason,
+          importance: directory.importance,
+        }));
 
   return (
     <div className="manual-card">
@@ -1552,78 +1637,17 @@ function ProjectManualCard({ manual }: { manual: ProjectManual | null }) {
       </div>
 
       <div className="manual-grid">
-        <ManualColumn title="技术栈" empty="未识别明确技术栈">
-          {manual.technology_stack.slice(0, 6).map((item) => (
-            <div className="manual-row" key={`${item.name}-${item.evidence_source}`}>
-              <strong>{item.name}</strong>
-              <span>{item.category}</span>
-              <p>{item.purpose}</p>
+        <ManualColumn title="关键目录 / Repo Map" empty="暂无关键目录">
+          {repoMapItems.slice(0, 10).map((item) => (
+            <div className="manual-row" key={item.path}>
+              <code>{item.path}</code>
+              <span>
+                {item.role} · {item.importance}
+              </span>
+              <p>{item.reason}</p>
             </div>
           ))}
         </ManualColumn>
-
-        <ManualColumn title="模块作用" empty="暂无模块说明">
-          {manual.modules.slice(0, 6).map((module) => (
-            <div className="manual-row" key={module.id}>
-              <strong>{module.name}</strong>
-              <span>{module.type}</span>
-              <p>{module.responsibility}</p>
-            </div>
-          ))}
-        </ManualColumn>
-
-        <ManualColumn title="项目入口" empty="暂无入口候选">
-          {manual.entrypoints.slice(0, 6).map((entrypoint) => (
-            <div className="manual-row" key={`${entrypoint.kind}-${entrypoint.path}`}>
-              <code>{entrypoint.path}</code>
-              <span>{entrypoint.kind}</span>
-              <p>{entrypoint.reason}</p>
-            </div>
-          ))}
-        </ManualColumn>
-      </div>
-
-      <div className="manual-tree">
-        <div>
-          <h4>真实目录树</h4>
-          <div className="tree-list compact">
-            {manual.directory_tree.slice(0, 42).map((entry) => (
-              <button
-                className={
-                  entry.kind === "directory" && entry.path === selectedDirectory?.path
-                    ? "tree-row selectable active"
-                    : entry.kind === "directory" && directoryByPath.has(entry.path)
-                      ? "tree-row selectable"
-                      : "tree-row"
-                }
-                disabled={entry.kind !== "directory" || !directoryByPath.has(entry.path)}
-                key={entry.path}
-                onClick={() => setSelectedDirectoryPath(entry.path)}
-                style={{ paddingLeft: `${entry.depth * 12 + 8}px` }}
-                type="button"
-              >
-                <span>{entry.kind === "directory" ? "dir" : "file"}</span>
-                <code>{entry.path}</code>
-              </button>
-            ))}
-          </div>
-        </div>
-        <div>
-          <h4>目录作用</h4>
-          <div className="manual-directory-detail">
-            {selectedDirectory ? (
-              <div className="manual-row">
-                <code>{selectedDirectory.path}</code>
-                <span>
-                  {selectedDirectory.role} · {selectedDirectory.importance}
-                </span>
-                <p>{selectedDirectory.reason}</p>
-              </div>
-            ) : (
-              <span className="muted">点击左侧模块级目录后，会显示该目录的作用。</span>
-            )}
-          </div>
-        </div>
       </div>
     </div>
   );
@@ -1944,6 +1968,10 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   );
 }
 
+function isPresent<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined && value !== "";
+}
+
 function EvidenceSnippet({ evidence }: { evidence: RepoMapEvidence }) {
   return (
     <div className="snippet">
@@ -2001,7 +2029,7 @@ async function postAskStream(body: AskModeRequest, onEvent: (event: AskStreamEve
       const frames = buffer.split("\n\n");
       buffer = frames.pop() ?? "";
       for (const frame of frames) {
-        const event = parseSseFrame(frame);
+        const event = parseSseFrame<AskStreamEvent>(frame);
         if (!event) {
           continue;
         }
@@ -2021,7 +2049,7 @@ async function postAskStream(body: AskModeRequest, onEvent: (event: AskStreamEve
   }
 
   if (buffer.trim()) {
-    const event = parseSseFrame(buffer);
+    const event = parseSseFrame<AskStreamEvent>(buffer);
     if (event) {
       const normalized = normalizeAskStreamEvent(event);
       if (normalized.type === "error") {
@@ -2040,7 +2068,74 @@ async function postAskStream(body: AskModeRequest, onEvent: (event: AskStreamEve
   return finalResult;
 }
 
-function parseSseFrame(frame: string): AskStreamEvent | null {
+async function postAgentRunStream(
+  body: { project_path: string; question: string },
+  onEvent?: (event: AgentRunStreamEvent) => void,
+): Promise<Interpretation> {
+  const response = await fetch(`${API_BASE_URL}/api/agent/run/stream`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || !response.body) {
+    return parseJsonResponse<Interpretation>(response);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalResult: Interpretation | null = null;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (value) {
+      buffer += decoder.decode(value, { stream: !done });
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() ?? "";
+      for (const frame of frames) {
+        const event = parseSseFrame<AgentRunStreamEvent>(frame);
+        if (!event) {
+          continue;
+        }
+        if (event.type === "error") {
+          onEvent?.(event);
+          throw new Error(event.error ?? "Agent run stream failed.");
+        }
+        if (event.type === "final" && event.event) {
+          finalResult = event.event;
+        }
+        onEvent?.(event);
+      }
+    }
+    if (done) {
+      break;
+    }
+  }
+
+  if (buffer.trim()) {
+    const event = parseSseFrame<AgentRunStreamEvent>(buffer);
+    if (event) {
+      if (event.type === "error") {
+        onEvent?.(event);
+        throw new Error(event.error ?? "Agent run stream failed.");
+      }
+      if (event.type === "final" && event.event) {
+        finalResult = event.event;
+      }
+      onEvent?.(event);
+    }
+  }
+
+  if (!finalResult) {
+    throw new Error("Agent run stream ended before final result.");
+  }
+  return finalResult;
+}
+
+function parseSseFrame<T>(frame: string): T | null {
   const dataLines = frame
     .split("\n")
     .filter((line) => line.startsWith("data:"))
@@ -2049,7 +2144,7 @@ function parseSseFrame(frame: string): AskStreamEvent | null {
     return null;
   }
   try {
-    return JSON.parse(dataLines.join("\n")) as AskStreamEvent;
+    return JSON.parse(dataLines.join("\n")) as T;
   } catch {
     return null;
   }
@@ -2119,6 +2214,7 @@ function intentLabel(intent: AskIntent) {
 function askResultText(result: AskModeResult) {
   const sections = [
     `生成方式：${result.used_llm ? `百炼模型 ${result.llm_model ?? ""}`.trim() : "规则降级"}`,
+    result.fallback_reason ? `降级原因：${result.fallback_reason}` : "",
     result.answer,
     result.related_files.length ? `相关文件：\n${result.related_files.slice(0, 8).map((path) => `- ${path}`).join("\n")}` : "",
     result.implementation_path.length ? `实现路径：\n${result.implementation_path.slice(0, 8).map((path) => `- ${path}`).join("\n")}` : "",

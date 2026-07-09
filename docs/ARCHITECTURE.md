@@ -94,7 +94,9 @@ Phase 1 计划 API：
 - `POST /api/projects/repo-map`
 - `POST /api/agent/project-interpretation`
 - `POST /api/agent/run`
+- `POST /api/agent/run/stream`
 - `POST /api/agent/ask`
+- `POST /api/agent/ask/stream`
 - `GET /api/tasks/{task_id}/events`
 
 本地会话与 registry API：
@@ -118,7 +120,7 @@ Phase 1 最小实现：
 - 路由层只负责请求校验和错误映射，扫描逻辑位于 `code_reader_agent.scanner.scan_project`。
 - 扫描结果使用 Pydantic model 返回，包含文件树摘要、前端 package 信息、`java_build` Java 构建配置摘要、技术栈标签、入口文件和 warnings。
 - `POST /api/projects/repo-map` 使用 `code_reader_agent.repo_map.builder.build_repo_map` 返回基础模块、文件角色、入口和 evidence。
-- 当前不实现任务队列、持久化和事件流。
+- 当前不实现任务队列；首次项目说明书和报告后 Ask 已提供轻量 SSE 进度流。
 
 GitHub Import 层：
 
@@ -132,7 +134,7 @@ Phase 5 MVP 主入口：
 
 - `POST /api/agent/run` 是目标驱动分析任务入口。
 - 返回兼容旧字段的同时新增 `task_id`、`analysis_goal`、`analysis_plan`、`selected_skills`、`context_snapshot`、`report` 和 `trace_events`。
-- LLM 不可用时使用 deterministic fallback，但仍返回完整 plan、context、report 和 trace。
+- LLM 不可用时使用 deterministic fallback，但仍返回完整 plan、context、report、trace 和 `fallback_reason`。
 - 模型层位于 `code_reader_agent.runtime.llm_client`，默认使用百炼 OpenAI-compatible `glm-5.1`，从 `DASHSCOPE_API_KEY` 和 `DASHSCOPE_BASE_URL` 读取配置。
 - 当前不实现持久化任务队列或 SSE 事件流。
 
@@ -141,7 +143,7 @@ Ask 模式入口：
 - `POST /api/agent/ask` 是报告生成后的右侧追问入口。
 - 输入 `project_path`、`question` 和可选 `session_memory`。
 - 返回 `resolved_query`、`intent_result`、`tool_plan`、`context_pack`、`code_evidence`、`intent`、`answer`、`related_files`、`implementation_path`、`key_code_notes`、`references`、`tool_calls`、`trace_events` 和 `session_memory`。
-- 返回还包含 `used_llm`、`fallback_used` 和 `llm_model`，用于区分真实百炼回答和确定性降级回答。
+- 返回还包含 `used_llm`、`fallback_used`、`fallback_reason` 和 `llm_model`，用于区分真实百炼回答和确定性降级回答，并向前端解释降级原因。
 - 当前支持 8 类意图：项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈和符号定位。
 - Ask 模式只允许只读工具，不写被分析仓库，不运行项目命令，不执行 Git 操作。
 
@@ -173,7 +175,7 @@ Legacy Phase 4 单 Agent 解读：
 
 - 使用 `code_reader_agent.runtime.analysis` 生成 deterministic plan、skill selection、context snapshot、report 和 trace。
 - LLM loop 只允许模型选择 `scan_project`、`build_repo_map`、`read_file` 和 `search_code`。
-- 没有 LLM provider、LLM 输出非法或超过步数时，降级到 deterministic fallback。
+- 没有 LLM provider、LLM 输出非法或超过步数时，降级到 deterministic fallback，并把原因写入 `fallback_reason`。
 - fallback 仍必须返回完整分析任务结构，保证本地 demo 不依赖真实模型。
 
 Ask runtime：
@@ -181,7 +183,7 @@ Ask runtime：
 - `code_reader_agent.runtime.ask_mode` 使用 LangGraph `StateGraph` 表达节点流程。
 - 节点顺序固定为 `QueryRewriter -> IntentClassifier -> ContextRetriever -> ToolPlanner -> EvidenceCollector -> ContextBuilder -> AnswerComposer -> MemoryUpdater`。
 - 如果本地开发环境暂时无法安装 `langgraph`，runtime 会使用同顺序的最小 fallback 以便离线测试；生产依赖仍在 `pyproject.toml` 中声明为 `langgraph`。
-- Ask 使用百炼 LLM 基于 `ContextPack` 组织最终回答；LLM 不能绕过只读工具和 evidence 边界。缺少模型配置或调用失败时，Answer Composer 会降级为确定性模板。
+- Ask 使用百炼 LLM 基于 `ContextPack` 组织最终回答；LLM 不能绕过只读工具和 evidence 边界。缺少模型配置或调用失败时，Answer Composer 会降级为确定性模板，并返回 `fallback_reason`。
 
 ## Tool System 层
 

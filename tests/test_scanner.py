@@ -104,6 +104,67 @@ def write_minimal_java_project(root: Path) -> None:
     )
 
 
+def write_vue_spring_monorepo(root: Path) -> None:
+    frontend = root / "frontend"
+    backend = root / "backend"
+    (frontend / "src" / "router").mkdir(parents=True)
+    (frontend / "src" / "views").mkdir(parents=True)
+    (backend / "src" / "main" / "java" / "com" / "example" / "demo").mkdir(parents=True)
+    (backend / "src" / "main" / "resources").mkdir(parents=True)
+    (frontend / "package.json").write_text(
+        json.dumps(
+            {
+                "name": "monorepo-web",
+                "scripts": {"dev": "vite", "build": "vite build"},
+                "dependencies": {"vue": "^3.5.0", "vue-router": "^4.4.0"},
+                "devDependencies": {"vite": "^5.4.0", "typescript": "^5.5.0"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    (frontend / "src" / "main.ts").write_text("import { createApp } from 'vue';\n", encoding="utf-8")
+    (frontend / "src" / "App.vue").write_text("<template><RouterView /></template>\n", encoding="utf-8")
+    (frontend / "src" / "router" / "index.ts").write_text("export const routes = [];\n", encoding="utf-8")
+    (frontend / "src" / "views" / "HomeView.vue").write_text("<template><main /></template>\n", encoding="utf-8")
+    (frontend / "vite.config.ts").write_text("import { defineConfig } from 'vite';\n", encoding="utf-8")
+    (backend / "pom.xml").write_text(
+        """<project xmlns="http://maven.apache.org/POM/4.0.0">
+  <modelVersion>4.0.0</modelVersion>
+  <groupId>com.example</groupId>
+  <artifactId>monorepo-api</artifactId>
+  <version>0.1.0</version>
+  <dependencies>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+  </dependencies>
+</project>
+""",
+        encoding="utf-8",
+    )
+    (backend / "src" / "main" / "java" / "com" / "example" / "demo" / "DemoApplication.java").write_text(
+        "package com.example.demo;\n\n@SpringBootApplication\npublic class DemoApplication {}\n",
+        encoding="utf-8",
+    )
+    (backend / "src" / "main" / "java" / "com" / "example" / "demo" / "UserController.java").write_text(
+        "package com.example.demo;\n\n@RestController\npublic class UserController {}\n",
+        encoding="utf-8",
+    )
+    (backend / "src" / "main" / "java" / "com" / "example" / "demo" / "UserService.java").write_text(
+        "package com.example.demo;\n\n@Service\npublic class UserService {}\n",
+        encoding="utf-8",
+    )
+    (backend / "src" / "main" / "java" / "com" / "example" / "demo" / "UserRepository.java").write_text(
+        "package com.example.demo;\n\n@Repository\npublic class UserRepository {}\n",
+        encoding="utf-8",
+    )
+    (backend / "src" / "main" / "resources" / "application.yml").write_text(
+        "spring:\n  application:\n    name: monorepo-api\n",
+        encoding="utf-8",
+    )
+
+
 def test_scan_minimal_vue_vite_project(tmp_path: Path) -> None:
     write_minimal_vue_project(tmp_path)
 
@@ -126,6 +187,34 @@ def test_scan_minimal_vue_vite_project(tmp_path: Path) -> None:
     assert "src/main.ts" in tree_paths
     assert "node_modules" not in tree_paths
     assert "node_modules/ignored-package" not in tree_paths
+    assert result.warnings == []
+
+
+def test_scan_vue_spring_monorepo_detects_subproject_configs_and_entrypoints(tmp_path: Path) -> None:
+    write_vue_spring_monorepo(tmp_path)
+
+    result = scan_project(tmp_path)
+
+    assert result.project_name == "monorepo-web"
+    assert result.package.found is True
+    assert result.package.scripts["frontend:dev"] == "vite"
+    assert result.java_build.found is True
+    assert result.java_build.build_tool == "maven"
+    assert result.java_build.artifact_id == "monorepo-api"
+    assert result.java_build.config_files == ["backend/src/main/resources/application.yml"]
+
+    stack_names = {tag.name for tag in result.detected_stack}
+    assert {"Vue", "Vite", "TypeScript", "Java", "Maven", "Spring Web"} <= stack_names
+
+    entrypoint_paths = {entry.path for entry in result.entrypoints}
+    assert {
+        "frontend/src/main.ts",
+        "frontend/src/App.vue",
+        "frontend/src/router/index.ts",
+        "frontend/vite.config.ts",
+        "backend/src/main/java/com/example/demo/DemoApplication.java",
+        "backend/src/main/resources/application.yml",
+    } <= entrypoint_paths
     assert result.warnings == []
 
 

@@ -414,6 +414,9 @@ class ProjectManualModule(BaseModel):
     responsibility: str
     key_files: list[str] = Field(default_factory=list)
     entry_files: list[str] = Field(default_factory=list)
+    related_files: list[str] = Field(default_factory=list)
+    api_candidates: list[str] = Field(default_factory=list)
+    identification_basis: str = ""
     confidence: float = 1.0
 
 
@@ -435,13 +438,49 @@ class ProjectManualDirectory(BaseModel):
     reason: str
 
 
+class ProjectManualOverview(BaseModel):
+    """MVP project manual overview shown before Ask mode."""
+
+    project_name: str = ""
+    project_type: str = ""
+    one_liner: str = ""
+    main_stack: list[str] = Field(default_factory=list)
+    build_tools: list[str] = Field(default_factory=list)
+    entrypoints: list[str] = Field(default_factory=list)
+    maturity_observations: list[str] = Field(default_factory=list)
+
+
+class ProjectManualRepoMapItem(BaseModel):
+    """One key directory navigation item in the MVP manual."""
+
+    path: str
+    role: str
+    reason: str
+    importance: Literal["core", "supporting", "skippable"] = "supporting"
+
+
+class ProjectManualCoreModule(BaseModel):
+    """One Top module card for the MVP project manual."""
+
+    id: str
+    name: str
+    responsibility: str
+    related_files: list[str] = Field(default_factory=list)
+    api_candidates: list[str] = Field(default_factory=list)
+    identification_basis: str = ""
+    confidence: float = 0.5
+
+
 class ProjectManual(BaseModel):
     """Stable first-pass project manual used before follow-up questions."""
 
     title: str = ""
     overview: ProjectSummary | None = None
+    manual_overview: ProjectManualOverview | None = None
     technology_stack: list[StackExplanation] = Field(default_factory=list)
+    repo_map: list[ProjectManualRepoMapItem] = Field(default_factory=list)
     modules: list[ProjectManualModule] = Field(default_factory=list)
+    core_modules: list[ProjectManualCoreModule] = Field(default_factory=list)
     entrypoints: list[ProjectManualEntrypoint] = Field(default_factory=list)
     directory_tree: list[FileTreeEntry] = Field(default_factory=list)
     key_directories: list[ProjectManualDirectory] = Field(default_factory=list)
@@ -841,6 +880,7 @@ class AskModeResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
     used_llm: bool = False
     fallback_used: bool = False
+    fallback_reason: str | None = None
     llm_model: str | None = None
 
 
@@ -919,4 +959,5 @@ class AgentRunResult(BaseModel):
     agent_steps: list[AgentStep] = Field(default_factory=list)
     used_llm: bool = False
     fallback_used: bool = False
+    fallback_reason: str | None = None
     fallback_result: ProjectInterpretationResult | None = None

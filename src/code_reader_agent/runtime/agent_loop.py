@@ -18,6 +18,7 @@ from code_reader_agent.models import (
 )
 from code_reader_agent.repo_map.builder import build_repo_map
 from code_reader_agent.runtime.analysis import enrich_agent_run_result
+from code_reader_agent.runtime.project_manual_generator import generate_project_manual
 from code_reader_agent.scanner import ProjectScanError, scan_project
 from code_reader_agent.tools.read_only import ReadOnlyToolError, read_file, search_code
 from code_reader_agent.runtime.llm_client import LLMConfigurationError, LiteLLMClient
@@ -49,11 +50,6 @@ When you have enough evidence, respond with a JSON object only:
     "problem": "...",
     "confidence": 0.7,
     "evidence": ["README.md", "package.json"]
-  },
-  "manual_overrides": {
-    "modules": [{"id": "controller", "responsibility": "基于证据改写的模块职责。"}],
-    "entrypoints": [{"path": "src/main.ts", "reason": "基于证据改写的入口说明。"}],
-    "directories": [{"path": "src", "role": "前端源码目录", "reason": "基于证据改写的目录解释。"}]
   },
   "evidence": [{"path": "...", "reason": "...", "source": "...", "start_line": 1, "end_line": 3, "excerpt": "..."}],
   "read_files": ["..."],
@@ -117,6 +113,35 @@ def run_agent_loop(
     """Run a bounded read-only LLM tool-calling loop with deterministic fallback."""
 
     fallback = interpret_project(project_path, question)
+    if _is_project_manual_request(question):
+        repo_map = build_repo_map(scan_project(project_path))
+        manual_result = generate_project_manual(project_path=project_path, repo_map=repo_map, llm_client=llm_client)
+        manual_overview = manual_result.project_manual.manual_overview
+        final_answer = (
+            manual_overview.one_liner
+            if manual_overview and manual_overview.one_liner
+            else f"{fallback.overview}\n\n{fallback.setup_summary}"
+        )
+        return enrich_agent_run_result(
+            project_path=project_path,
+            project_name=fallback.project_name,
+            question=question,
+            skill=fallback.skill,
+            final_answer=final_answer,
+            evidence=fallback.evidence,
+            tool_calls=fallback.tool_calls,
+            read_files=fallback.read_files,
+            suggested_questions=fallback.suggested_questions,
+            warnings=_dedupe_strings([*fallback.warnings, *manual_result.warnings]),
+            agent_steps=manual_result.agent_steps,
+            used_llm=manual_result.used_llm,
+            fallback_used=manual_result.fallback_used,
+            fallback_result=fallback if manual_result.fallback_used else None,
+            fallback_reason=_first_warning(manual_result.warnings) if manual_result.fallback_used else None,
+            project_manual_context=project_manual_context,
+            project_manual_override=manual_result.project_manual,
+        )
+
     client = llm_client or LiteLLMClient()
     if llm_client is None and isinstance(client, LiteLLMClient) and not client.is_configured():
         missing_envs = " or ".join(client.missing_environment_variables())
@@ -244,11 +269,8 @@ def run_agent_loop(
         final_warnings = _dedupe_strings([*warnings, *_string_list(parsed.get("warnings"))])
         final_questions = _string_list(parsed.get("suggested_questions")) or fallback.suggested_questions
         overview_override = _parse_project_summary(parsed.get("project_summary"))
-        manual_overrides = _parse_manual_overrides(parsed.get("manual_overrides"))
         if parsed.get("project_summary") is not None and overview_override is None:
             final_warnings.append("LLM project_summary was invalid; deterministic overview was used.")
-        if parsed.get("manual_overrides") is not None and manual_overrides is None:
-            final_warnings.append("LLM manual_overrides was invalid; deterministic manual prose was used.")
         agent_steps.append(
             AgentStep(
                 index=len(agent_steps) + 1,
@@ -274,7 +296,6 @@ def run_agent_loop(
             fallback_result=None,
             project_manual_context=project_manual_context,
             overview_override=overview_override,
-            manual_overrides=manual_overrides,
         )
 
     return _fallback_result(
@@ -323,6 +344,21 @@ def _initial_messages(
         {"role": "system", "content": AGENT_SYSTEM_PROMPT},
         {"role": "user", "content": "\n".join(user_content)},
     ]
+
+
+def _is_project_manual_request(question: str) -> bool:
+    normalized = question.lower()
+    return any(
+        keyword in normalized
+        for keyword in (
+            "项目说明书",
+            "说明书",
+            "project manual",
+            "manual",
+            "真实目录树",
+            "目录解释",
+        )
+    )
 
 
 def _execute_tool(project_path: str, tool_name: str, arguments: dict[str, Any]) -> _ToolResult:
@@ -513,6 +549,7 @@ def _fallback_result(
         used_llm=False,
         fallback_used=True,
         fallback_result=fallback,
+        fallback_reason=warning,
         project_manual_context=project_manual_context,
     )
 
@@ -589,7 +626,9 @@ def _line_range(arguments: dict[str, Any]) -> tuple[int, int] | None:
 
 
 def _parse_final_json(content: str) -> dict[str, Any] | None:
-    stripped = content.strip()
+    stripped = _extract_json_object(content.strip())
+    if stripped is None:
+        return None
     if stripped.startswith("```"):
         stripped = stripped.strip("`")
         if stripped.startswith("json"):
@@ -599,6 +638,39 @@ def _parse_final_json(content: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
+
+
+def _extract_json_object(content: str) -> str | None:
+    if not content:
+        return None
+    stripped = content.strip()
+    if stripped.startswith("```") or stripped.startswith("{"):
+        return stripped
+    start = stripped.find("{")
+    if start < 0:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index, char in enumerate(stripped[start:], start=start):
+        if escaped:
+            escaped = False
+            continue
+        if char == "\\":
+            escaped = True
+            continue
+        if char == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return stripped[start : index + 1]
+    return None
 
 
 def _parse_evidence(raw_evidence: Any) -> list[EvidenceRef]:
@@ -622,24 +694,6 @@ def _parse_project_summary(raw_summary: Any) -> ProjectSummary | None:
         return ProjectSummary.model_validate(raw_summary)
     except ValidationError:
         return None
-
-
-def _parse_manual_overrides(raw_overrides: Any) -> dict[str, Any] | None:
-    if not isinstance(raw_overrides, dict):
-        return None
-    allowed_keys = {"modules", "entrypoints", "directories"}
-    parsed = {key: value for key, value in raw_overrides.items() if key in allowed_keys}
-    if not parsed:
-        return {}
-    for key, value in parsed.items():
-        if value is None:
-            continue
-        if isinstance(value, list) and all(isinstance(item, dict) for item in value):
-            continue
-        if isinstance(value, dict) and all(isinstance(item, dict) for item in value.values()):
-            continue
-        return None
-    return parsed
 
 
 def _budget_step(index: int, warning: str) -> AgentStep:
@@ -679,6 +733,13 @@ def _dedupe_strings(values: list[str]) -> list[str]:
         seen.add(value)
         unique.append(value)
     return unique
+
+
+def _first_warning(warnings: list[str]) -> str | None:
+    for warning in warnings:
+        if warning:
+            return warning
+    return None
 
 
 def _truncate_tool_output(content: str) -> str:

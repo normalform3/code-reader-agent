@@ -10,7 +10,7 @@ import apps.api.main as api_main
 from apps.api.main import app
 from code_reader_agent.github_importer import GitHubCloneError
 from code_reader_agent.models import AgentRunResult, AgentStep, GitHubImportResult
-from tests.test_scanner import write_minimal_java_project
+from tests.test_scanner import write_minimal_java_project, write_vue_spring_monorepo
 
 
 client = TestClient(app)
@@ -72,6 +72,25 @@ def test_repo_map_api_returns_modules(tmp_path: Path) -> None:
     assert payload["controllers"] == ["src/main/java/com/example/demo/UserController.java"]
     assert "pom.xml" in {item["path"] for item in payload["evidence"]}
     assert any(item["excerpt"] for item in payload["evidence"] if item["path"] == "pom.xml")
+
+
+def test_repo_map_api_supports_vue_spring_monorepo_subdirectories(tmp_path: Path) -> None:
+    write_vue_spring_monorepo(tmp_path)
+
+    response = client.post("/api/projects/repo-map", json={"project_path": str(tmp_path)})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert {tag["name"] for tag in payload["detected_stack"]} >= {"Vue", "Vite", "TypeScript", "Java", "Maven", "Spring Web"}
+    assert {module["id"] for module in payload["modules"]} >= {"app", "config", "router", "views", "controller", "service", "repository"}
+    assert {
+        "frontend/package.json",
+        "frontend/vite.config.ts",
+        "backend/pom.xml",
+        "backend/src/main/java/com/example/demo/DemoApplication.java",
+    } <= {item["path"] for item in payload["evidence"]}
+    assert "frontend/src/main.ts" in {entry["path"] for entry in payload["entrypoints"]}
+    assert "backend/src/main/resources/application.yml" in {entry["path"] for entry in payload["entrypoints"]}
 
 
 def test_scan_project_api_returns_clear_error_for_invalid_path(tmp_path: Path) -> None:
@@ -482,6 +501,32 @@ def test_agent_ask_stream_api_returns_error_event_for_invalid_path(tmp_path: Pat
     assert "Project path does not exist" in response.text
 
 
+def test_agent_run_stream_api_returns_sse_progress_and_project_manual(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+    write_vue_spring_monorepo(tmp_path)
+
+    response = client.post(
+        "/api/agent/run/stream",
+        json={"project_path": str(tmp_path), "question": "生成项目说明书"},
+    )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    frames = [frame for frame in response.text.split("\n\n") if frame.strip()]
+    assert any(frame.startswith("event: step") for frame in frames)
+    assert any(frame.startswith("event: trace") for frame in frames)
+    assert frames[-1].startswith("event: final")
+    data_line = next(line for line in frames[-1].splitlines() if line.startswith("data: "))
+    payload = json.loads(data_line.removeprefix("data: "))
+    assert payload["type"] == "final"
+    manual = payload["event"]["project_manual"]
+    assert manual["manual_overview"]["project_type"] == "前后端分离"
+    assert "frontend/src/main.ts" in {entry["path"] for entry in manual["entrypoints"]}
+    assert "backend/src/main/java/com/example/demo/DemoApplication.java" in {entry["path"] for entry in manual["entrypoints"]}
+
+
 def test_model_settings_api_updates_model_and_reports_missing_env(tmp_path: Path, monkeypatch: Any) -> None:
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
     monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
@@ -511,6 +556,10 @@ def test_model_settings_api_updates_model_and_reports_missing_env(tmp_path: Path
 
 
 def test_agent_run_api_returns_llm_result_with_mock(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    settings_response = client.post("/api/model-settings", json={"model": "qwen-plus"})
+    assert settings_response.status_code == 200
+
     captured_manual_context: dict[str, Any] = {}
 
     def fake_run_agent_loop(
@@ -521,10 +570,12 @@ def test_agent_run_api_returns_llm_result_with_mock(tmp_path: Path, monkeypatch:
         max_context_chars: int = 24_000,
         max_tool_calls: int = 8,
         max_read_files: int = 4,
+        llm_client: Any = None,
         project_manual_context: Any = None,
     ) -> AgentRunResult:
         captured_manual_context["value"] = project_manual_context
         captured_manual_context["budget"] = (max_context_chars, max_tool_calls, max_read_files)
+        captured_manual_context["model"] = llm_client.config.model
         return AgentRunResult(
             project_name="mock-project",
             question=question,
@@ -567,3 +618,4 @@ def test_agent_run_api_returns_llm_result_with_mock(tmp_path: Path, monkeypatch:
     assert payload["final_answer"] == "LLM answer"
     assert captured_manual_context["value"].title == "mock-project 项目说明书"
     assert captured_manual_context["budget"] == (12000, 3, 2)
+    assert captured_manual_context["model"] == "qwen-plus"

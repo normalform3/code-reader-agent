@@ -82,18 +82,20 @@ def build_repo_map(scan: ProjectScanResult) -> RepoMap:
 def _build_evidence(scan: ProjectScanResult) -> list[RepoMapEvidence]:
     evidence: list[RepoMapEvidence] = []
     if scan.package.found:
-        evidence.append(
-            _evidence(
-                scan.project_path,
-                "package.json",
-                "package.json",
-                "Frontend package metadata, scripts, and dependencies.",
-                "read_config",
+        for package_path in _file_tree_paths_named(scan.file_tree, {"package.json"}):
+            evidence.append(
+                _evidence(
+                    scan.project_path,
+                    package_path,
+                    package_path,
+                    "Frontend package metadata, scripts, and dependencies.",
+                    "read_config",
+                )
             )
-        )
     if scan.java_build.found:
-        build_path = "pom.xml" if scan.java_build.build_tool == "maven" else "build.gradle" if scan.java_build.build_tool == "gradle" else "<file_tree>"
-        evidence.append(_evidence(scan.project_path, build_path, build_path, "Java build metadata and dependencies.", "read_config"))
+        build_paths = _file_tree_paths_named(scan.file_tree, {"pom.xml", "build.gradle", "build.gradle.kts"})
+        for build_path in build_paths or ["<file_tree>"]:
+            evidence.append(_evidence(scan.project_path, build_path, build_path, "Java build metadata and dependencies.", "read_config"))
     for readme_path in ("README.md", "readme.md", "README.MD"):
         if any(entry.path == readme_path for entry in scan.file_tree):
             evidence.append(_evidence(scan.project_path, readme_path, readme_path, "Project README used for first-screen overview.", "read_readme"))
@@ -200,11 +202,18 @@ def _build_project_summary(scan: ProjectScanResult, evidence: list[RepoMapEviden
     stack_summary = "、".join(stack_names[:4]) if stack_names else "当前未识别出明确技术栈"
     evidence_paths = [item.path for item in evidence if item.path != "<file_tree>"][:4]
 
+    has_frontend, has_backend = _scan_has_frontend_and_backend(scan)
+
     if readme_text:
         one_liner = f"{scan.project_name} 看起来是 {readme_text}"
         audience = "面向需要使用或维护该仓库的开发者；该判断来自 README 和项目配置。"
         problem = f"它主要解决 README 中描述的项目目标，并通过 {stack_summary} 等技术实现。"
         confidence = 0.78
+    elif has_frontend and has_backend:
+        one_liner = f"{scan.project_name} 看起来是一个基于 {stack_summary} 的前后端分离项目。"
+        audience = "面向需要理解前端页面和后端接口协作关系的全栈开发者。"
+        problem = "当前缺少 README 语义说明，只能根据前端 package、Java 构建配置、入口和分层文件保守判断项目用途。"
+        confidence = 0.58
     elif scan.package.found:
         one_liner = f"{scan.project_name} 看起来是一个基于 {stack_summary} 的前端或 Node 项目。"
         audience = "面向项目使用者和维护该代码库的前端/全栈开发者。"
@@ -429,9 +438,9 @@ def _file_role(path: str) -> str:
         return "config"
     if name in {"dockerfile", "vercel.json", "netlify.toml"} or lowered.endswith((".yml", ".yaml")) and ("/.github/" in lowered or "docker" in lowered):
         return "config"
-    if "src/main/resources/application." in path:
+    if "/src/main/resources/application." in f"/{path}":
         return "config"
-    if path in {"src/main.ts", "src/main.js"} or name.endswith("Application.java"):
+    if path in {"src/main.ts", "src/main.js"} or path.endswith(("/src/main.ts", "/src/main.js")) or name.endswith("Application.java"):
         return "app_entry"
     if "/router/" in lowered:
         return "router"
@@ -455,7 +464,7 @@ def _file_role(path: str) -> str:
         return "service"
     if name.endswith("Repository.java") or name.endswith("Mapper.java") or name.endswith("Dao.java"):
         return "repository"
-    if "/test/" in lowered or path.startswith("src/test/"):
+    if "/test/" in lowered or path.startswith("src/test/") or "/src/test/" in f"/{lowered}":
         return "test"
     return "source"
 
@@ -507,9 +516,9 @@ def _framework_for_path(path: str, role: str) -> str | None:
         return "Python"
     if path.endswith(".java") or role in {"controller", "service", "repository"}:
         return "Spring Boot" if role == "controller" else "Java"
-    if path == "pom.xml":
+    if PurePosixPath(path).name == "pom.xml":
         return "Maven"
-    if path.startswith("build.gradle"):
+    if PurePosixPath(path).name in {"build.gradle", "build.gradle.kts"}:
         return "Gradle"
     return None
 
@@ -561,15 +570,27 @@ def _candidate_auth_paths(files: list[RepoMapFile]) -> list[str]:
 
 def _java_packages(files: list[RepoMapFile]) -> set[str]:
     packages: set[str] = set()
-    prefix = "src/main/java/"
     for file in files:
-        if not file.path.startswith(prefix):
+        marker = "/src/main/java/"
+        normalized = f"/{file.path}"
+        if marker not in normalized:
             continue
-        relative = file.path.removeprefix(prefix)
+        relative = normalized.split(marker, 1)[1]
         parts = relative.split("/")[:-1]
         if parts:
             packages.add(".".join(parts))
     return packages
+
+
+def _file_tree_paths_named(file_tree: list[FileTreeEntry], names: set[str]) -> list[str]:
+    return sorted(entry.path for entry in file_tree if entry.kind == "file" and PurePosixPath(entry.path).name in names)
+
+
+def _scan_has_frontend_and_backend(scan: ProjectScanResult) -> tuple[bool, bool]:
+    stack_names = {tag.name for tag in scan.detected_stack}
+    has_frontend = bool(stack_names & {"Vue", "Vite", "React", "Next.js"} or scan.package.found)
+    has_backend = bool(stack_names & {"Spring Boot", "Spring Web", "Java", "FastAPI", "Express"} or scan.java_build.found)
+    return has_frontend, has_backend
 
 
 def _dedupe_evidence(evidence: list[RepoMapEvidence]) -> list[RepoMapEvidence]:

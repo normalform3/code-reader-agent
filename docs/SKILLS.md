@@ -150,7 +150,7 @@ Tool Planner 再把这些 hints 转成只读工具计划。最终回答必须基
 - evidence。
 - uncertainties。
 
-当前实现：由 `code_reader_agent.runtime.analysis.build_project_manual` 和 `build_project_report` 基于 Repo Map 和 Agent 输出生成。首次分析返回 `project_manual` 和 `project_memory`，后续追问通过 `/api/agent/ask` 使用 Project Memory 和 Session Memory。
+当前实现：说明书请求由 `code_reader_agent.runtime.project_manual_generator.generate_project_manual` 使用专用 structured LLM call 生成项目总览、关键目录导航和核心模块卡片；`build_project_report` 继续基于 Repo Map 和 Agent 输出生成结构化报告。首次分析返回 `project_manual` 和 `project_memory`，后续追问通过 `/api/agent/ask` 使用 Project Memory 和 Session Memory。
 
 ## project_overview_skill
 

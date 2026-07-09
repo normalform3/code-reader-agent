@@ -242,6 +242,7 @@ def test_agent_loop_uses_fallback_on_llm_error(tmp_path: Path) -> None:
 
     assert result.used_llm is False
     assert result.fallback_used is True
+    assert result.fallback_reason == "LLM agent loop failed: boom"
     assert any("LLM agent loop failed" in warning for warning in result.warnings)
     assert result.analysis_plan
     assert result.context_snapshot.evidence_count > 0
@@ -283,6 +284,7 @@ def test_agent_loop_uses_fallback_when_final_json_invalid(tmp_path: Path) -> Non
     result = run_agent_loop(str(tmp_path), "这个项目是干什么的？", llm_client=client)
 
     assert result.fallback_used is True
+    assert result.fallback_reason == "LLM final answer was not valid JSON; deterministic fallback was used."
     assert any("not valid JSON" in warning for warning in result.warnings)
 
 
@@ -314,47 +316,35 @@ def test_agent_loop_selects_spring_boot_skill_and_report_for_java(tmp_path: Path
     assert any(entry.kind == "java_app_entry" for entry in result.project_manual.entrypoints)
 
 
-def test_agent_loop_applies_valid_llm_manual_overrides(tmp_path: Path) -> None:
+def test_agent_loop_uses_dedicated_project_manual_generator(tmp_path: Path) -> None:
     write_minimal_java_project(tmp_path)
-    app_path = "src/main/java/com/example/demo/DemoApplication.java"
+    controller_path = "src/main/java/com/example/demo/UserController.java"
     client = FakeLLMClient(
         [
             final_response(
                 {
-                    "answer": "这是一个 Spring Boot 服务。",
-                    "skill": "project_overview_skill",
-                    "project_summary": {
-                        "one_liner": "LLM 判断这是一个用户服务后端。",
-                        "audience": "面向后端维护者。",
-                        "problem": "提供用户相关接口和服务分层。",
-                        "confidence": 0.86,
-                        "evidence": ["pom.xml", app_path],
+                    "overview": {
+                        "project_name": "demo-service",
+                        "project_type": "后端",
+                        "one_liner": "LLM 生成：这是一个 Spring Boot 用户服务后端。",
+                        "main_stack": ["Spring Boot", "MyBatis"],
+                        "build_tools": ["Maven"],
+                        "entrypoints": ["src/main/java/com/example/demo/DemoApplication.java"],
+                        "maturity_observations": ["包含 Maven 构建配置"],
                     },
-                    "manual_overrides": {
-                        "modules": [
-                            {
-                                "id": "controller",
-                                "responsibility": "接收 HTTP 请求并把用户相关操作交给服务层处理。",
-                            }
-                        ],
-                        "entrypoints": [
-                            {
-                                "path": app_path,
-                                "reason": "Spring Boot 启动类，负责加载自动配置并启动后端应用。",
-                            }
-                        ],
-                        "directories": [
-                            {
-                                "path": "src",
-                                "role": "后端源码与资源根目录",
-                                "reason": "包含 Java 源码、resources 配置和项目主实现。",
-                            }
-                        ],
-                    },
-                    "evidence": [],
-                    "read_files": [],
+                    "repo_map": [{"path": "src", "role": "后端源码根目录", "reason": "包含 Java 源码和资源。", "importance": "core"}],
+                    "modules": [
+                        {
+                            "id": "controller",
+                            "name": "用户接口模块",
+                            "responsibility": "接收用户相关 HTTP 请求并转交服务层处理。",
+                            "related_files": [controller_path],
+                            "api_candidates": [],
+                            "identification_basis": "根据 UserController.java 和 Controller 注解识别。",
+                            "confidence": 0.86,
+                        }
+                    ],
                     "warnings": [],
-                    "suggested_questions": [],
                 }
             )
         ]
@@ -362,31 +352,69 @@ def test_agent_loop_applies_valid_llm_manual_overrides(tmp_path: Path) -> None:
 
     result = run_agent_loop(str(tmp_path), "生成项目说明书", llm_client=client)
 
-    assert result.project_manual.generated_by == "LLM Agent + ProjectManualBuilder"
-    assert result.project_manual.overview
-    assert result.project_manual.overview.one_liner == "LLM 判断这是一个用户服务后端。"
-    assert any(module.id == "controller" and "HTTP 请求" in module.responsibility for module in result.project_manual.modules)
-    assert any(entry.path == app_path and "Spring Boot 启动类" in entry.reason for entry in result.project_manual.entrypoints)
-    assert any(directory.path == "src" and directory.role == "后端源码与资源根目录" for directory in result.project_manual.key_directories)
+    assert result.project_manual.generated_by == "ProjectManualLLMGenerator + ProjectManualBuilder"
+    assert result.project_manual.manual_overview
+    assert result.project_manual.manual_overview.one_liner.startswith("LLM 生成")
+    assert any(item.path == "src" and item.role == "后端源码根目录" for item in result.project_manual.repo_map)
+    assert any(module.id == "controller" and "HTTP 请求" in module.responsibility for module in result.project_manual.core_modules)
+    assert result.used_llm is True
+    assert result.fallback_reason is None
 
 
-def test_agent_loop_ignores_invalid_llm_manual_overrides(tmp_path: Path) -> None:
+def test_agent_loop_sends_dedicated_manual_candidates_to_llm(tmp_path: Path) -> None:
     write_minimal_java_project(tmp_path)
     client = FakeLLMClient(
         [
             final_response(
                 {
-                    "answer": "这是一个 Spring Boot 服务。",
-                    "skill": "project_overview_skill",
-                    "manual_overrides": {
-                        "modules": [{"id": "missing-module", "responsibility": "不应该出现。"}],
-                        "entrypoints": [{"path": "missing/File.java", "reason": "不应该出现。"}],
-                        "directories": [{"path": "missing", "role": "不应该出现。"}],
+                    "overview": {
+                        "project_name": "demo-service",
+                        "project_type": "后端",
+                        "one_liner": "这是一个 Spring Boot 服务。",
+                        "main_stack": ["Spring Boot"],
+                        "build_tools": ["Maven"],
+                        "entrypoints": [],
+                        "maturity_observations": [],
                     },
-                    "evidence": [],
-                    "read_files": [],
+                    "repo_map": [],
+                    "modules": [],
                     "warnings": [],
-                    "suggested_questions": [],
+                }
+            )
+        ]
+    )
+
+    result = run_agent_loop(str(tmp_path), "生成项目说明书", llm_client=client)
+
+    user_message = client.messages[1]["content"]
+    assert "module_candidates" in user_message
+    assert "directory_candidates" in user_message
+    assert "allowed_file_paths" in user_message
+    assert "manual_overrides" not in user_message
+    assert result.project_manual.manual_overview
+
+
+def test_agent_loop_filters_invalid_dedicated_manual_output(tmp_path: Path) -> None:
+    write_minimal_java_project(tmp_path)
+    client = FakeLLMClient(
+        [
+            final_response(
+                {
+                    "overview": {
+                        "project_name": "demo-service",
+                        "project_type": "后端",
+                        "one_liner": "这是一个 Spring Boot 服务。",
+                        "main_stack": ["Spring Boot"],
+                        "build_tools": ["Maven"],
+                        "entrypoints": [],
+                        "maturity_observations": [],
+                    },
+                    "repo_map": [{"path": "missing", "role": "不应该出现。", "reason": "不应该出现。"}],
+                    "modules": [
+                        {"id": "missing-module", "responsibility": "不应该出现。", "related_files": ["missing/File.java"]},
+                        {"id": "controller", "responsibility": "保留合法模块但过滤非法文件。", "related_files": ["missing/File.java"]},
+                    ],
+                    "warnings": [],
                 }
             )
         ]
@@ -395,11 +423,10 @@ def test_agent_loop_ignores_invalid_llm_manual_overrides(tmp_path: Path) -> None
     result = run_agent_loop(str(tmp_path), "生成项目说明书", llm_client=client)
 
     assert any("unknown module id: missing-module" in warning for warning in result.warnings)
-    assert any("unknown path: missing/File.java" in warning for warning in result.warnings)
-    assert any("unknown path: missing" in warning for warning in result.warnings)
+    assert any("unknown file path: missing/File.java" in warning for warning in result.warnings)
+    assert any("unknown directory path: missing" in warning for warning in result.warnings)
     assert all(module.responsibility != "不应该出现。" for module in result.project_manual.modules)
-    assert all(entry.reason != "不应该出现。" for entry in result.project_manual.entrypoints)
-    assert all(directory.role != "不应该出现。" for directory in result.project_manual.key_directories)
+    assert all(item.path != "missing" for item in result.project_manual.repo_map)
 
 
 def test_agent_loop_reuses_project_manual_context_for_followup(tmp_path: Path) -> None:
@@ -416,3 +443,13 @@ def test_agent_loop_reuses_project_manual_context_for_followup(tmp_path: Path) -
 
     assert result.fallback_used is True
     assert any("project_manual_context=" in item for item in result.context_snapshot.memory_context)
+
+
+def test_agent_loop_reports_project_manual_fallback_reason(tmp_path: Path) -> None:
+    write_minimal_vue_project(tmp_path)
+
+    result = run_agent_loop(str(tmp_path), "生成项目说明书", llm_client=FakeLLMClient(error=RuntimeError("manual offline")))
+
+    assert result.fallback_used is True
+    assert result.fallback_reason == "Project manual LLM generation failed: manual offline"
+    assert any("Project manual LLM generation failed" in warning for warning in result.warnings)

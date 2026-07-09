@@ -6,7 +6,7 @@ import json
 import re
 import tomllib
 import xml.etree.ElementTree as ET
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any
 
 from code_reader_agent.models import (
@@ -119,6 +119,8 @@ JAVA_LAYER_SUFFIXES = (
     ("Mapper.java", "java_mapper"),
 )
 
+CONFIG_DISCOVERY_MAX_DEPTH = 2
+
 
 class ProjectScanError(ValueError):
     """Raised when a project path cannot be scanned."""
@@ -135,7 +137,7 @@ def scan_project(project_path: str | Path) -> ProjectScanResult:
 
     warnings: list[str] = []
     file_tree = _scan_file_tree(root)
-    package = _read_package_json(root, warnings)
+    package = _read_package_json(root, file_tree, warnings)
     java_build = _read_java_build(root, file_tree, warnings)
     if not package.found and not java_build.found:
         warnings.append("package.json not found; package metadata and dependency-based stack detection are unavailable.")
@@ -181,51 +183,70 @@ def _scan_file_tree(root: Path) -> list[FileTreeEntry]:
     return entries
 
 
-def _read_package_json(root: Path, warnings: list[str]) -> PackageInfo:
-    package_path = root / "package.json"
-    if not package_path.exists():
+def _read_package_json(root: Path, file_tree: list[FileTreeEntry], warnings: list[str]) -> PackageInfo:
+    package_paths = _config_paths(root, file_tree, ("package.json",))
+    if not package_paths:
         return PackageInfo(found=False, package_manager=_detect_package_manager(root, None))
 
-    try:
-        raw_data = json.loads(package_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
-        warnings.append(f"package.json could not be parsed: {exc.msg}.")
+    packages: list[tuple[str, Path, dict[str, Any]]] = []
+    for package_path in package_paths:
+        relative_path = package_path.relative_to(root).as_posix()
+        try:
+            raw_data = json.loads(package_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            warnings.append(f"{relative_path} could not be parsed: {exc.msg}.")
+            continue
+        if not isinstance(raw_data, dict):
+            warnings.append(f"{relative_path} root value is not an object.")
+            continue
+        packages.append((relative_path, package_path.parent, raw_data))
+
+    if not packages:
         return PackageInfo(found=False, package_manager=_detect_package_manager(root, None))
 
-    if not isinstance(raw_data, dict):
-        warnings.append("package.json root value is not an object.")
-        return PackageInfo(found=False, package_manager=_detect_package_manager(root, None))
+    scripts: dict[str, str] = {}
+    dependencies: dict[str, str] = {}
+    dev_dependencies: dict[str, str] = {}
+    package_manager: str | None = None
+    first_package = packages[0][2]
+    for relative_path, package_root, raw_data in packages:
+        prefix = _config_parent_prefix(relative_path)
+        for name, command in _string_dict(raw_data.get("scripts")).items():
+            scripts[_prefixed_script_name(prefix, name)] = command
+        dependencies.update(_string_dict(raw_data.get("dependencies")))
+        dev_dependencies.update(_string_dict(raw_data.get("devDependencies")))
+        package_manager = package_manager or _detect_package_manager(package_root, _optional_string(raw_data.get("packageManager")))
 
     return PackageInfo(
         found=True,
-        name=_optional_string(raw_data.get("name")),
-        version=_optional_string(raw_data.get("version")),
-        package_manager=_detect_package_manager(root, _optional_string(raw_data.get("packageManager"))),
-        scripts=_string_dict(raw_data.get("scripts")),
-        dependencies=_string_dict(raw_data.get("dependencies")),
-        dev_dependencies=_string_dict(raw_data.get("devDependencies")),
+        name=_optional_string(first_package.get("name")),
+        version=_optional_string(first_package.get("version")),
+        package_manager=package_manager,
+        scripts=scripts,
+        dependencies=dependencies,
+        dev_dependencies=dev_dependencies,
     )
 
 
 def _read_java_build(root: Path, file_tree: list[FileTreeEntry], warnings: list[str]) -> JavaBuildInfo:
-    pom_path = root / "pom.xml"
-    gradle_path = root / "build.gradle"
-    gradle_kts_path = root / "build.gradle.kts"
-    settings_path = root / "settings.gradle"
-    settings_kts_path = root / "settings.gradle.kts"
-    config_files = [
-        relative_path
-        for relative_path in JAVA_CONFIG_CANDIDATES
-        if (root / relative_path).exists()
-    ]
+    config_files = _java_config_files(file_tree)
+    maven_paths = _config_paths(root, file_tree, ("pom.xml",))
+    gradle_paths = _config_paths(root, file_tree, ("build.gradle", "build.gradle.kts"))
+    builds: list[tuple[str, JavaBuildInfo]] = []
 
-    if pom_path.exists():
-        return _read_maven_build(pom_path, config_files, warnings)
+    for pom_path in maven_paths:
+        relative_path = pom_path.relative_to(root).as_posix()
+        builds.append((relative_path, _read_maven_build(pom_path, _scoped_java_config_files(relative_path, config_files), warnings)))
 
-    for build_path in (gradle_path, gradle_kts_path):
-        if build_path.exists():
-            settings_name = _read_gradle_project_name(settings_path, settings_kts_path)
-            return _read_gradle_build(build_path, settings_name, config_files, warnings)
+    for build_path in gradle_paths:
+        relative_path = build_path.relative_to(root).as_posix()
+        build_root = build_path.parent
+        settings_name = _read_gradle_project_name(build_root / "settings.gradle", build_root / "settings.gradle.kts")
+        builds.append((relative_path, _read_gradle_build(build_path, settings_name, _scoped_java_config_files(relative_path, config_files), warnings)))
+
+    valid_builds = [(path, build) for path, build in builds if build.found]
+    if valid_builds:
+        return _merge_java_builds(valid_builds, config_files)
 
     if _looks_like_java_project(file_tree):
         return JavaBuildInfo(found=True, build_tool=None, config_files=config_files)
@@ -286,9 +307,9 @@ def _detect_stack(
     if "Vue" not in {tag.name for tag in detected} and any(path.endswith(".vue") for path in file_paths):
         detected.append(StackTag(name="Vue", source="file_tree:*.vue", confidence=0.8))
 
-    if "Vite" not in {tag.name for tag in detected} and {"vite.config.ts", "vite.config.js"} & file_paths:
+    if "Vite" not in {tag.name for tag in detected} and any(PurePath(path).name in {"vite.config.ts", "vite.config.js"} for path in file_paths):
         detected.append(StackTag(name="Vite", source="file_tree:vite.config", confidence=0.8))
-    if "Next.js" not in {tag.name for tag in detected} and {"next.config.ts", "next.config.js", "next.config.mjs"} & file_paths:
+    if "Next.js" not in {tag.name for tag in detected} and any(PurePath(path).name in {"next.config.ts", "next.config.js", "next.config.mjs"} for path in file_paths):
         detected.append(StackTag(name="Next.js", source="file_tree:next.config", confidence=0.8))
     if "React" not in {tag.name for tag in detected} and any(path.endswith((".tsx", ".jsx")) for path in file_paths):
         detected.append(StackTag(name="React", source="file_tree:*.tsx|*.jsx", confidence=0.65))
@@ -379,28 +400,29 @@ def _normalize_python_dependency(raw_dependency: object) -> str:
 
 
 def _find_entrypoints(root: Path, file_tree: list[FileTreeEntry]) -> list[Entrypoint]:
+    file_paths = {entry.path for entry in file_tree if entry.kind == "file"}
     static_entrypoints = [
-        Entrypoint(path=relative_path, kind=kind, exists=True)
-        for relative_path, kind in ENTRYPOINT_CANDIDATES
-        if (root / relative_path).exists()
+        Entrypoint(path=path, kind=kind, exists=True)
+        for path in sorted(file_paths)
+        for candidate_path, kind in ENTRYPOINT_CANDIDATES
+        if path == candidate_path or path.endswith(f"/{candidate_path}")
     ]
     java_entrypoints = [
         Entrypoint(path=entry.path, kind=kind, exists=True)
         for entry in file_tree
         if entry.kind == "file"
         for suffix, kind in JAVA_LAYER_SUFFIXES
-        if entry.path.startswith("src/main/java/") and entry.path.endswith(suffix)
+        if "/src/main/java/" in f"/{entry.path}" and entry.path.endswith(suffix)
     ]
     config_entrypoints = [
-        Entrypoint(path=relative_path, kind="java_config", exists=True)
-        for relative_path in JAVA_CONFIG_CANDIDATES
-        if (root / relative_path).exists()
+        Entrypoint(path=path, kind="java_config", exists=True)
+        for path in _java_config_files(file_tree)
     ]
     return static_entrypoints + java_entrypoints + config_entrypoints
 
 
 def _looks_like_java_project(file_tree: list[FileTreeEntry]) -> bool:
-    return any(entry.kind == "file" and entry.path.startswith("src/main/java/") for entry in file_tree)
+    return any(entry.kind == "file" and "/src/main/java/" in f"/{entry.path}" for entry in file_tree)
 
 
 def _maven_text(root_element: ET.Element, path: str) -> str | None:
@@ -469,6 +491,62 @@ def _read_gradle_build(path: Path, settings_name: str | None, config_files: list
         artifact_id=settings_name,
         version=_gradle_assignment(content, "version"),
         dependencies=_gradle_dependencies(content),
+        config_files=config_files,
+    )
+
+
+def _config_paths(root: Path, file_tree: list[FileTreeEntry], names: tuple[str, ...]) -> list[Path]:
+    paths: list[Path] = []
+    for entry in file_tree:
+        if entry.kind != "file" or entry.name not in names:
+            continue
+        relative_parts = PurePath(entry.path).parts
+        if len(relative_parts) - 1 > CONFIG_DISCOVERY_MAX_DEPTH:
+            continue
+        paths.append(root / entry.path)
+    return sorted(paths, key=lambda item: (len(item.relative_to(root).parts), item.relative_to(root).as_posix()))
+
+
+def _config_parent_prefix(relative_path: str) -> str:
+    parent = PurePath(relative_path).parent.as_posix()
+    return "" if parent == "." else parent.replace("/", ":")
+
+
+def _prefixed_script_name(prefix: str, script_name: str) -> str:
+    return f"{prefix}:{script_name}" if prefix else script_name
+
+
+def _java_config_files(file_tree: list[FileTreeEntry]) -> list[str]:
+    return sorted(
+        entry.path
+        for entry in file_tree
+        if entry.kind == "file"
+        and any(entry.path == candidate or entry.path.endswith(f"/{candidate}") for candidate in JAVA_CONFIG_CANDIDATES)
+    )
+
+
+def _scoped_java_config_files(build_relative_path: str, config_files: list[str]) -> list[str]:
+    prefix = _config_parent_prefix(build_relative_path)
+    if not prefix:
+        return [path for path in config_files if path in JAVA_CONFIG_CANDIDATES]
+    path_prefix = prefix.replace(":", "/")
+    return [path for path in config_files if path.startswith(f"{path_prefix}/")]
+
+
+def _merge_java_builds(builds: list[tuple[str, JavaBuildInfo]], config_files: list[str]) -> JavaBuildInfo:
+    first_path, first_build = builds[0]
+    dependencies: dict[str, str | None] = {}
+    for _, build in builds:
+        dependencies.update(build.dependencies)
+    build_tools = {build.build_tool for _, build in builds if build.build_tool}
+    build_tool = first_build.build_tool if len(build_tools) <= 1 else "mixed"
+    return JavaBuildInfo(
+        found=True,
+        build_tool=build_tool,
+        group_id=first_build.group_id,
+        artifact_id=first_build.artifact_id or _config_parent_prefix(first_path) or None,
+        version=first_build.version,
+        dependencies=dependencies,
         config_files=config_files,
     )
 

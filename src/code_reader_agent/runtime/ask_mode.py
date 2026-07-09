@@ -138,6 +138,7 @@ class AskState(TypedDict):
     answer: NotRequired[str]
     used_llm: NotRequired[bool]
     fallback_used: NotRequired[bool]
+    fallback_reason: NotRequired[str | None]
     llm_model: NotRequired[str]
     warnings: NotRequired[list[str]]
     trace_events: NotRequired[list[TraceEvent]]
@@ -248,6 +249,7 @@ def _ask_result_from_state(state: AskState) -> AskModeResult:
         warnings=_dedupe_strings(state.get("warnings", [])),
         used_llm=state.get("used_llm", False),
         fallback_used=state.get("fallback_used", False),
+        fallback_reason=state.get("fallback_reason"),
         llm_model=state.get("llm_model"),
     )
 
@@ -650,6 +652,7 @@ def _answer_composer(state: AskState) -> AskState:
         "answer": answer,
         "used_llm": used_llm,
         "fallback_used": not used_llm,
+        "fallback_reason": warning if not used_llm else None,
         "llm_model": llm_model,
         "warnings": _dedupe_strings(warnings),
         "key_code_notes": _dedupe_strings(notes),
@@ -657,7 +660,7 @@ def _answer_composer(state: AskState) -> AskState:
             state,
             "Answer Composer",
             "LLM 证据化回答" if used_llm else "模板降级回答",
-            "Composed answer with Bailian LLM and Context Pack." if used_llm else "Composed deterministic fallback answer because LLM was unavailable.",
+            "Composed answer with Bailian LLM and Context Pack." if used_llm else (warning or "Composed deterministic fallback answer because LLM was unavailable."),
         ),
     }
 

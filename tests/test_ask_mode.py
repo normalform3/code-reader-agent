@@ -77,6 +77,8 @@ def test_ask_mode_overview_uses_project_memory_without_tools(tmp_path: Path, mon
     assert result.tool_calls == []
     assert result.used_llm is False
     assert result.fallback_used is True
+    assert result.fallback_reason
+    assert "Missing" in result.fallback_reason
     assert result.resolved_query
     assert result.context_pack
     assert result.context_pack.project_context
