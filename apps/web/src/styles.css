@@ -450,7 +450,7 @@ button:disabled {
 
 .agent-panel {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   gap: 12px;
   border-left: 1px solid #d7dfeb;
   height: 100vh;
@@ -962,6 +962,30 @@ code {
   padding: 6px 8px;
 }
 
+.ask-conversation-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.ask-conversation-bar select {
+  min-width: 0;
+  border: 1px solid #d8e4ef;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #25334a;
+  font-size: 12px;
+  font-weight: 700;
+  padding: 8px 10px;
+}
+
+.ask-conversation-bar button {
+  min-height: 34px;
+  background: #26364f;
+  padding: 0 11px;
+}
+
 .ask-scroll-area {
   display: grid;
   align-content: start;
@@ -1088,21 +1112,6 @@ code {
   color: #243247;
   font-size: 12px;
   font-weight: 800;
-}
-
-.ask-context ol {
-  display: grid;
-  gap: 8px;
-  margin: 10px 0 0;
-  padding-left: 18px;
-}
-
-.ask-context li {
-  color: #4f5d73;
-  font-size: 12px;
-  line-height: 1.45;
-  overflow-wrap: anywhere;
-  word-break: break-word;
 }
 
 .context-note {

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import UTC, datetime
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,16 +16,22 @@ from code_reader_agent.github_importer import GitHubCloneError, GitHubImportErro
 from code_reader_agent.interpreter import interpret_project
 from code_reader_agent.local_state import (
     LocalStateError,
+    create_ask_conversation,
     create_skill,
     create_tool,
+    delete_ask_conversation,
     delete_project_session,
     delete_skill,
     delete_tool,
+    get_ask_conversation_by_id,
     list_project_sessions,
+    list_ask_conversations,
     list_skills,
     list_tools,
     get_model_settings,
     save_project_memory,
+    update_ask_conversation,
+    update_ask_conversation_by_id,
     update_model_settings,
     update_project_session,
     update_skill,
@@ -33,6 +41,10 @@ from code_reader_agent.local_state import (
 from code_reader_agent.models import (
     AgentRunRequest,
     AgentRunResult,
+    AskConversation,
+    AskConversationCreate,
+    AskConversationMessage,
+    AskConversationUpdate,
     AskModeRequest,
     AskModeResult,
     GitHubImportRequest,
@@ -134,6 +146,47 @@ def delete_project_history_api(project_id: str) -> dict[str, bool]:
 
     try:
         delete_project_session(project_id)
+        return {"deleted": True}
+    except LocalStateError as exc:
+        raise _state_http_error(exc) from exc
+
+
+@app.get("/api/projects/{project_id}/ask-conversations", response_model=list[AskConversation])
+def list_ask_conversations_api(project_id: str) -> list[AskConversation]:
+    """List persisted Ask conversations for one project session."""
+
+    try:
+        return list_ask_conversations(project_id)
+    except LocalStateError as exc:
+        raise _state_http_error(exc) from exc
+
+
+@app.post("/api/projects/{project_id}/ask-conversations", response_model=AskConversation)
+def create_ask_conversation_api(project_id: str, request: AskConversationCreate) -> AskConversation:
+    """Create a new Ask conversation under a project session."""
+
+    try:
+        return create_ask_conversation(project_id, request)
+    except LocalStateError as exc:
+        raise _state_http_error(exc) from exc
+
+
+@app.patch("/api/projects/{project_id}/ask-conversations/{conversation_id}", response_model=AskConversation)
+def update_ask_conversation_api(project_id: str, conversation_id: str, request: AskConversationUpdate) -> AskConversation:
+    """Patch an Ask conversation without storing code context."""
+
+    try:
+        return update_ask_conversation(project_id, conversation_id, request)
+    except LocalStateError as exc:
+        raise _state_http_error(exc) from exc
+
+
+@app.delete("/api/projects/{project_id}/ask-conversations/{conversation_id}")
+def delete_ask_conversation_api(project_id: str, conversation_id: str) -> dict[str, bool]:
+    """Remove one Ask conversation from local state."""
+
+    try:
+        delete_ask_conversation(project_id, conversation_id)
         return {"deleted": True}
     except LocalStateError as exc:
         raise _state_http_error(exc) from exc
@@ -378,11 +431,19 @@ def ask_agent_api(request: AskModeRequest) -> AskModeResult:
     """Run report-side Ask mode against project memory and read-only tools."""
 
     try:
-        return run_ask_mode(
+        conversation = get_ask_conversation_by_id(request.conversation_id) if request.conversation_id else None
+        if conversation and conversation.project_path != request.project_path:
+            raise LocalStateError("Ask conversation does not belong to the requested project path.")
+        session_memory = conversation.session_memory if conversation else request.session_memory
+        result = run_ask_mode(
             request.project_path,
             request.question,
-            session_memory=request.session_memory,
+            session_memory=session_memory,
+            persist_session_memory=conversation is None,
         )
+        if conversation:
+            _persist_ask_conversation_turn(conversation, request.question, result)
+        return result
     except ProjectScanError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LocalStateError as exc:
@@ -395,11 +456,21 @@ def ask_agent_stream_api(request: AskModeRequest) -> StreamingResponse:
 
     def event_stream():
         try:
+            conversation = get_ask_conversation_by_id(request.conversation_id) if request.conversation_id else None
+            if conversation and conversation.project_path != request.project_path:
+                raise LocalStateError("Ask conversation does not belong to the requested project path.")
+            session_memory = conversation.session_memory if conversation else request.session_memory
             for event in run_ask_mode_events(
                 request.project_path,
                 request.question,
-                session_memory=request.session_memory,
+                session_memory=session_memory,
+                persist_session_memory=conversation is None,
             ):
+                if event["type"] == "final" and conversation:
+                    event_payload = event.get("event", {})
+                    result = AskModeResult.model_validate(event_payload)
+                    conversation = _persist_ask_conversation_turn(conversation, request.question, result)
+                    event["conversation"] = conversation.model_dump()
                 yield _sse_event(event["type"], event)
         except (ProjectScanError, LocalStateError) as exc:
             yield _sse_event("error", {"type": "error", "error": str(exc)})
@@ -411,6 +482,60 @@ def ask_agent_stream_api(request: AskModeRequest) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _persist_ask_conversation_turn(conversation: AskConversation, question: str, result: AskModeResult) -> AskConversation:
+    now = _now()
+    title = conversation.title
+    if title == "新对话" and not conversation.messages:
+        title = _conversation_title(question)
+    messages = [
+        *conversation.messages,
+        AskConversationMessage(id=_new_message_id("user"), role="user", body=question, created_at=now),
+        AskConversationMessage(
+            id=_new_message_id("assistant"),
+            role="assistant",
+            body=result.answer,
+            meta=f"Ask · {_intent_label(result.intent)} · {result.llm_model or '规则'}",
+            created_at=now,
+        ),
+    ]
+    return update_ask_conversation_by_id(
+        conversation.id,
+        AskConversationUpdate(
+            title=title,
+            messages=messages[-40:],
+            session_memory=result.session_memory,
+            last_question=question,
+        ),
+    )
+
+
+def _conversation_title(question: str) -> str:
+    value = " ".join(question.strip().split())
+    return value[:28] or "新对话"
+
+
+def _new_message_id(role: str) -> str:
+    return f"{role}-{uuid4().hex[:12]}"
+
+
+def _intent_label(intent: str) -> str:
+    return {
+        "project_overview": "项目总览",
+        "module_explanation": "模块解释",
+        "file_explanation": "文件解释",
+        "flow_trace": "流程追踪",
+        "api_lookup": "接口定位",
+        "config_lookup": "配置定位",
+        "tech_stack": "技术栈",
+        "symbol_lookup": "符号定位",
+        "general": "通用问题",
+    }.get(intent, intent)
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def _state_http_error(exc: LocalStateError) -> HTTPException:

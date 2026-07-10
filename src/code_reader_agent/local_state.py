@@ -12,6 +12,9 @@ from uuid import uuid4
 from pydantic import ValidationError
 
 from code_reader_agent.models import (
+    AskConversation,
+    AskConversationCreate,
+    AskConversationUpdate,
     ModelSettings,
     ModelSettingsUpdate,
     ProjectMemory,
@@ -512,6 +515,120 @@ def delete_project_session(project_id: str) -> None:
     sessions = [_parse_project_session(item) for item in state.get("project_sessions", [])]
     _find_project_session(sessions, project_id)
     state["project_sessions"] = [item.model_dump() for item in sessions if item.id != project_id]
+    conversations = state.get("ask_conversations", {})
+    if isinstance(conversations, dict):
+        conversations.pop(project_id, None)
+        state["ask_conversations"] = conversations
+    _write_state(state)
+
+
+def get_project_session(project_id: str) -> ProjectSession:
+    """Return a persisted project session by id."""
+
+    state = _read_state()
+    sessions = [_parse_project_session(item) for item in state.get("project_sessions", [])]
+    return _find_project_session(sessions, project_id)
+
+
+def list_ask_conversations(project_id: str) -> list[AskConversation]:
+    """Return Ask conversations for a project session, newest first."""
+
+    state = _read_state()
+    sessions = [_parse_project_session(item) for item in state.get("project_sessions", [])]
+    _find_project_session(sessions, project_id)
+    conversations = _parse_ask_conversations(state.get("ask_conversations", {}), project_id)
+    return sorted(conversations, key=lambda item: item.updated_at, reverse=True)
+
+
+def create_ask_conversation(project_id: str, payload: AskConversationCreate) -> AskConversation:
+    """Create an empty Ask conversation for a project session."""
+
+    state = _read_state()
+    sessions = [_parse_project_session(item) for item in state.get("project_sessions", [])]
+    project = _find_project_session(sessions, project_id)
+    conversations = _ask_conversations_state(state)
+    now = _now()
+    conversation = AskConversation(
+        id=_new_id("ask"),
+        project_id=project.id,
+        project_path=project.project_path,
+        title=payload.title or "新对话",
+        messages=[],
+        session_memory=SessionMemory(project_id=project_id_for_path(project.project_path), updated_at=now),
+        last_question=None,
+        created_at=now,
+        updated_at=now,
+    )
+    project_conversations = _parse_ask_conversations(conversations, project_id)
+    project_conversations.append(conversation)
+    conversations[project_id] = [item.model_dump() for item in project_conversations]
+    state["ask_conversations"] = conversations
+    _write_state(state)
+    return conversation
+
+
+def get_ask_conversation(project_id: str, conversation_id: str) -> AskConversation:
+    """Return one Ask conversation by id."""
+
+    conversations = list_ask_conversations(project_id)
+    return _find_ask_conversation(conversations, conversation_id)
+
+
+def get_ask_conversation_by_id(conversation_id: str) -> AskConversation:
+    """Return one Ask conversation by globally unique id."""
+
+    state = _read_state()
+    conversations_state = _ask_conversations_state(state)
+    for project_id in conversations_state:
+        conversation = _find_ask_conversation_or_none(_parse_ask_conversations(conversations_state, str(project_id)), conversation_id)
+        if conversation is not None:
+            return conversation
+    raise LocalStateError(f"Ask conversation not found: {conversation_id}")
+
+
+def update_ask_conversation(project_id: str, conversation_id: str, payload: AskConversationUpdate) -> AskConversation:
+    """Update an Ask conversation without persisting code context."""
+
+    state = _read_state()
+    sessions = [_parse_project_session(item) for item in state.get("project_sessions", [])]
+    _find_project_session(sessions, project_id)
+    conversations_state = _ask_conversations_state(state)
+    conversations = _parse_ask_conversations(conversations_state, project_id)
+    current = _find_ask_conversation(conversations, conversation_id)
+    updates: dict[str, object] = {}
+    if payload.title is not None:
+        updates["title"] = payload.title
+    if payload.messages is not None:
+        updates["messages"] = payload.messages
+    if payload.session_memory is not None:
+        updates["session_memory"] = payload.session_memory
+    if payload.last_question is not None:
+        updates["last_question"] = payload.last_question
+    updated = current.model_copy(update={**updates, "updated_at": _now()})
+    conversations_state[project_id] = [updated.model_dump() if item.id == conversation_id else item.model_dump() for item in conversations]
+    state["ask_conversations"] = conversations_state
+    _write_state(state)
+    return updated
+
+
+def update_ask_conversation_by_id(conversation_id: str, payload: AskConversationUpdate) -> AskConversation:
+    """Update an Ask conversation by globally unique id."""
+
+    conversation = get_ask_conversation_by_id(conversation_id)
+    return update_ask_conversation(conversation.project_id, conversation_id, payload)
+
+
+def delete_ask_conversation(project_id: str, conversation_id: str) -> None:
+    """Delete one Ask conversation without touching project memory."""
+
+    state = _read_state()
+    sessions = [_parse_project_session(item) for item in state.get("project_sessions", [])]
+    _find_project_session(sessions, project_id)
+    conversations_state = _ask_conversations_state(state)
+    conversations = _parse_ask_conversations(conversations_state, project_id)
+    _find_ask_conversation(conversations, conversation_id)
+    conversations_state[project_id] = [item.model_dump() for item in conversations if item.id != conversation_id]
+    state["ask_conversations"] = conversations_state
     _write_state(state)
 
 
@@ -714,6 +831,7 @@ def _read_state() -> dict[str, object]:
         "skills": raw.get("skills", []),
         "project_memories": raw.get("project_memories", {}),
         "session_memories": raw.get("session_memories", {}),
+        "ask_conversations": raw.get("ask_conversations", {}),
         "model_settings": raw.get("model_settings", DEFAULT_MODEL_SETTINGS.model_dump()),
     }
 
@@ -737,6 +855,7 @@ def _initial_state() -> dict[str, object]:
         "skills": [_builtin_registry_item(item, RegistrySkill, now).model_dump() for item in DEFAULT_SKILL_DEFINITIONS],
         "project_memories": {},
         "session_memories": {},
+        "ask_conversations": {},
         "model_settings": DEFAULT_MODEL_SETTINGS.model_dump(),
     }
 
@@ -858,11 +977,44 @@ def _parse_project_session(item: object) -> ProjectSession:
         raise LocalStateError("Local project session state contains an invalid item.") from exc
 
 
+def _ask_conversations_state(state: dict[str, object]) -> dict[str, object]:
+    conversations = state.get("ask_conversations", {})
+    if not isinstance(conversations, dict):
+        conversations = {}
+    return conversations
+
+
+def _parse_ask_conversations(raw_conversations: object, project_id: str) -> list[AskConversation]:
+    if not isinstance(raw_conversations, dict):
+        return []
+    raw_items = raw_conversations.get(project_id, [])
+    if not isinstance(raw_items, list):
+        return []
+    try:
+        return [AskConversation.model_validate(item) for item in raw_items]
+    except ValidationError as exc:
+        raise LocalStateError("Local Ask conversation state contains an invalid item.") from exc
+
+
 def _find_project_session(sessions: list[ProjectSession], project_id: str) -> ProjectSession:
     for item in sessions:
         if item.id == project_id:
             return item
     raise LocalStateError(f"Project session not found: {project_id}")
+
+
+def _find_ask_conversation(conversations: list[AskConversation], conversation_id: str) -> AskConversation:
+    for item in conversations:
+        if item.id == conversation_id:
+            return item
+    raise LocalStateError(f"Ask conversation not found: {conversation_id}")
+
+
+def _find_ask_conversation_or_none(conversations: list[AskConversation], conversation_id: str) -> AskConversation | None:
+    for item in conversations:
+        if item.id == conversation_id:
+            return item
+    return None
 
 
 def _find_registry_item(

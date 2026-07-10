@@ -102,6 +102,32 @@ def test_ask_mode_file_question_reads_real_file_and_records_reason(tmp_path: Pat
     assert result.context_pack and result.context_pack.code_evidence
 
 
+def test_ask_mode_rereads_current_workspace_code_after_file_changes(tmp_path: Path, monkeypatch: object) -> None:
+    disable_llm_env(monkeypatch)
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    write_minimal_java_project(tmp_path)
+    controller = tmp_path / "src" / "main" / "java" / "com" / "example" / "demo" / "UserController.java"
+
+    first = run_ask_mode(str(tmp_path), "UserController 是做什么的？")
+    controller.write_text(
+        "package com.example.demo;\n"
+        "import org.springframework.web.bind.annotation.GetMapping;\n"
+        "import org.springframework.web.bind.annotation.RestController;\n"
+        "@RestController\n"
+        "public class UserController {\n"
+        "  @GetMapping(\"/users\")\n"
+        "  public String changedUsers() { return \"changed-live-code\"; }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+
+    second = run_ask_mode(str(tmp_path), "UserController 是做什么的？", session_memory=first.session_memory)
+
+    tool_snippets = [item.code_snippet or "" for item in second.code_evidence if item.source == "tool"]
+    assert any("changed-live-code" in snippet for snippet in tool_snippets)
+    assert any(call.tool_name == "read_file" for call in second.tool_calls)
+
+
 def test_ask_mode_followup_uses_session_memory_for_api_question(tmp_path: Path, monkeypatch: object) -> None:
     disable_llm_env(monkeypatch)
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))

@@ -142,16 +142,19 @@ class AskState(TypedDict):
     llm_model: NotRequired[str]
     warnings: NotRequired[list[str]]
     trace_events: NotRequired[list[TraceEvent]]
+    persist_session_memory: NotRequired[bool]
 
 
 def run_ask_mode(
     project_path: str,
     question: str,
     session_memory: SessionMemory | None = None,
+    *,
+    persist_session_memory: bool = True,
 ) -> AskModeResult:
     """Run the structured Ask workflow for a project question."""
 
-    state = _initial_ask_state(project_path, question, session_memory)
+    state = _initial_ask_state(project_path, question, session_memory, persist_session_memory=persist_session_memory)
     state = _run_ask_nodes(state)
     return _ask_result_from_state(state)
 
@@ -160,10 +163,12 @@ def run_ask_mode_events(
     project_path: str,
     question: str,
     session_memory: SessionMemory | None = None,
+    *,
+    persist_session_memory: bool = True,
 ) -> Iterator[dict[str, Any]]:
     """Run Ask mode and yield public progress events plus the final result."""
 
-    state = _initial_ask_state(project_path, question, session_memory)
+    state = _initial_ask_state(project_path, question, session_memory, persist_session_memory=persist_session_memory)
     for node_name, node in _ask_node_sequence():
         before_trace_count = len(state.get("trace_events", []))
         before_tool_count = len(state.get("tool_calls", []))
@@ -184,6 +189,8 @@ def _initial_ask_state(
     project_path: str,
     question: str,
     session_memory: SessionMemory | None = None,
+    *,
+    persist_session_memory: bool = True,
 ) -> AskState:
     repo_map = build_repo_map(scan_project(project_path))
     project_memory = get_project_memory(project_path)
@@ -214,6 +221,7 @@ def _initial_ask_state(
         "key_code_notes": [],
         "warnings": [],
         "trace_events": [],
+        "persist_session_memory": persist_session_memory,
     }
 
 
@@ -643,6 +651,8 @@ def _answer_composer(state: AskState) -> AskState:
     warnings = list(state.get("warnings", []))
     if warning:
         warnings.append(warning)
+    if _requires_fresh_code_evidence(state) and not _has_fresh_tool_evidence(state):
+        warnings.append("项目认知可能过期，当前工作区未找到可用于确认该问题的实时代码证据。")
     if pack.code_evidence:
         notes.extend(_notes_from_code_evidence(pack.code_evidence))
     else:
@@ -757,7 +767,8 @@ def _memory_updater(state: AskState) -> AskState:
             "turns": [*session_memory.turns[-8:], turn],
         }
     )
-    updated = save_session_memory(updated)
+    if state.get("persist_session_memory", True):
+        updated = save_session_memory(updated)
     return {
         **state,
         "session_memory": updated,
@@ -1085,6 +1096,18 @@ def _notes_from_code_evidence(evidence: list[CodeEvidence]) -> list[str]:
         location = item.file_path or item.api or item.symbol or item.source
         notes.append(f"{location} 提供了当前回答的依据。")
     return notes
+
+
+def _requires_fresh_code_evidence(state: AskState) -> bool:
+    intent = state.get("intent")
+    if intent in {"file_explanation", "module_explanation", "api_lookup", "flow_trace", "symbol_lookup", "config_lookup"}:
+        return True
+    intent_result = state.get("intent_result")
+    return bool(intent_result and intent_result.need_code_evidence)
+
+
+def _has_fresh_tool_evidence(state: AskState) -> bool:
+    return any(item.source == "tool" for item in state.get("code_evidence", []))
 
 
 def _append_trace(state: AskState, stage: str, title: str, summary: str) -> list[TraceEvent]:

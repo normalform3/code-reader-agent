@@ -447,7 +447,28 @@ type AskModeResult = {
 type AskModeRequest = {
   project_path: string;
   question: string;
+  conversation_id?: string | null;
   session_memory: SessionMemory | null;
+};
+
+type AskConversationMessage = {
+  id: string;
+  role: "user" | "assistant";
+  body: string;
+  meta: string | null;
+  created_at: string;
+};
+
+type AskConversation = {
+  id: string;
+  project_id: string;
+  project_path: string;
+  title: string;
+  messages: AskConversationMessage[];
+  session_memory: SessionMemory;
+  last_question: string | null;
+  created_at: string;
+  updated_at: string;
 };
 
 type AskStreamEvent =
@@ -455,7 +476,7 @@ type AskStreamEvent =
   | { type: "tool_plan"; node?: string; event?: ToolPlan }
   | { type: "tool_result"; node?: string; event?: AskModeResult["tool_calls"][number] }
   | { type: "answer"; node?: string; event?: { answer?: string }; answer?: string }
-  | { type: "final"; event?: AskModeResult }
+  | { type: "final"; event?: AskModeResult; conversation?: AskConversation }
   | { type: "error"; error?: string };
 
 type AgentRunStreamStep = {
@@ -562,6 +583,8 @@ function App() {
   const [githubImport, setGithubImport] = useState<GitHubImportResult | null>(null);
   const [question, setQuestion] = useState("");
   const [askMessages, setAskMessages] = useState<AskMessage[]>([]);
+  const [askConversations, setAskConversations] = useState<AskConversation[]>([]);
+  const [activeAskConversationId, setActiveAskConversationId] = useState<string | null>(null);
   const [repoMap, setRepoMap] = useState<RepoMap | null>(null);
   const [interpretation, setInterpretation] = useState<Interpretation | null>(null);
   const [askResult, setAskResult] = useState<AskModeResult | null>(null);
@@ -577,6 +600,7 @@ function App() {
   }, []);
 
   const activeSession = sessions.find((item) => item.id === activeSessionId) ?? null;
+  const activeAskConversation = askConversations.find((item) => item.id === activeAskConversationId) ?? null;
 
   async function refreshSessions() {
     try {
@@ -588,6 +612,48 @@ function App() {
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "读取历史项目失败。");
     }
+  }
+
+  async function loadAskConversations(projectId: string, options: { ensureConversation?: boolean; preferredConversationId?: string | null } = {}) {
+    const ensureConversation = options.ensureConversation ?? true;
+    let conversations = await getJson<AskConversation[]>(`/api/projects/${projectId}/ask-conversations`);
+    if (conversations.length === 0 && ensureConversation) {
+      const created = await postJson<AskConversation>(`/api/projects/${projectId}/ask-conversations`, { title: "新对话" });
+      conversations = [created];
+    }
+    setAskConversations(conversations);
+    const selected =
+      conversations.find((item) => item.id === options.preferredConversationId) ??
+      conversations[0] ??
+      null;
+    setActiveAskConversationId(selected?.id ?? null);
+    setAskMessages(selected ? messagesFromConversation(selected) : []);
+    setAskSessionMemory(selected?.session_memory ?? null);
+    setAskResult(null);
+    return selected;
+  }
+
+  async function handleNewAskConversation() {
+    if (!activeSessionId) {
+      return;
+    }
+    const created = await postJson<AskConversation>(`/api/projects/${activeSessionId}/ask-conversations`, { title: "新对话" });
+    setAskConversations((current) => [created, ...current]);
+    setActiveAskConversationId(created.id);
+    setAskMessages([]);
+    setAskSessionMemory(created.session_memory);
+    setAskResult(null);
+  }
+
+  function handleSelectAskConversation(conversationId: string) {
+    const conversation = askConversations.find((item) => item.id === conversationId);
+    if (!conversation) {
+      return;
+    }
+    setActiveAskConversationId(conversation.id);
+    setAskMessages(messagesFromConversation(conversation));
+    setAskSessionMemory(conversation.session_memory);
+    setAskResult(null);
   }
 
   async function analyzeProject(
@@ -630,6 +696,8 @@ function App() {
     setInterpretation(null);
     setAskResult(null);
     setAskSessionMemory(null);
+    setAskConversations([]);
+    setActiveAskConversationId(null);
     setProjectManual(null);
     setAskMessages([]);
     setManualTraceEvents([]);
@@ -659,6 +727,7 @@ function App() {
         last_question: question.trim() || null,
       });
       setActiveSessionId(session.id);
+      await loadAskConversations(session.id);
       await refreshSessions();
     } catch (caught) {
       const message = caught instanceof Error ? caught.message : "导入或分析失败，请检查 GitHub 链接和本地 API。";
@@ -675,6 +744,8 @@ function App() {
     setQuestion("");
     setAskMessages([]);
     setAskSessionMemory(null);
+    setAskConversations([]);
+    setActiveAskConversationId(null);
     setManualTraceEvents([]);
     setManualTraceStreaming(true);
     setSidebarView("files");
@@ -684,6 +755,7 @@ function App() {
       });
       setManualTraceEvents((current) => (interpretationResult.trace_events?.length ? interpretationResult.trace_events : current));
       setManualTraceStreaming(false);
+      await loadAskConversations(session.id);
       await patchJson<ProjectSession>(`/api/projects/history/${session.id}`, {
           status: "ready",
           last_question: session.last_question,
@@ -711,6 +783,8 @@ function App() {
       setInterpretation(null);
       setAskResult(null);
       setAskSessionMemory(null);
+      setAskConversations([]);
+      setActiveAskConversationId(null);
       setProjectManual(null);
       setAskMessages([]);
       setManualTraceEvents([]);
@@ -731,6 +805,10 @@ function App() {
     }
     setStatus("loading");
     setError(null);
+    let conversation = activeAskConversation;
+    if (!conversation && activeSessionId) {
+      conversation = await loadAskConversations(activeSessionId);
+    }
     const assistantMessageId = `${Date.now()}-assistant-stream`;
     setAskMessages((current) => [
       ...current,
@@ -753,9 +831,15 @@ function App() {
         {
           project_path: projectPath.trim(),
           question: askedQuestion,
-          session_memory: askSessionMemory,
+          conversation_id: conversation?.id ?? null,
+          session_memory: conversation ? null : askSessionMemory,
         },
         (event) => {
+          if (event.type === "final" && event.conversation) {
+            setAskConversations((current) => upsertAskConversation(current, event.conversation as AskConversation));
+            setActiveAskConversationId(event.conversation.id);
+            setAskSessionMemory(event.conversation.session_memory);
+          }
           setAskMessages((current) =>
             current.map((message) => {
               if (message.id !== assistantMessageId) {
@@ -904,7 +988,9 @@ function App() {
 
       <ProjectWorkspace
         activeSession={activeSession}
+        activeAskConversationId={activeAskConversationId}
         askExpanded={askExpanded}
+        askConversations={askConversations}
         askMessages={askMessages}
         askResult={askResult}
         error={error}
@@ -913,6 +999,8 @@ function App() {
         manualTraceEvents={manualTraceEvents}
         manualTraceStreaming={manualTraceStreaming}
         onAsk={handleAsk}
+        onNewAskConversation={handleNewAskConversation}
+        onSelectAskConversation={handleSelectAskConversation}
         onSetQuestion={setQuestion}
         onToggleAskExpanded={() => setAskExpanded((current) => !current)}
         projectManual={projectManual}
@@ -1120,7 +1208,9 @@ function SidebarFileNode({
 
 function ProjectWorkspace({
   activeSession,
+  activeAskConversationId,
   askExpanded,
+  askConversations,
   askMessages,
   askResult,
   error,
@@ -1129,6 +1219,8 @@ function ProjectWorkspace({
   manualTraceEvents,
   manualTraceStreaming,
   onAsk,
+  onNewAskConversation,
+  onSelectAskConversation,
   onSetQuestion,
   onToggleAskExpanded,
   projectManual,
@@ -1137,7 +1229,9 @@ function ProjectWorkspace({
   status,
 }: {
   activeSession: ProjectSession | null;
+  activeAskConversationId: string | null;
   askExpanded: boolean;
+  askConversations: AskConversation[];
   askMessages: AskMessage[];
   askResult: AskModeResult | null;
   error: string | null;
@@ -1146,6 +1240,8 @@ function ProjectWorkspace({
   manualTraceEvents: TraceEvent[];
   manualTraceStreaming: boolean;
   onAsk: () => void;
+  onNewAskConversation: () => void;
+  onSelectAskConversation: (conversationId: string) => void;
   onSetQuestion: (question: string) => void;
   onToggleAskExpanded: () => void;
   projectManual: ProjectManual | null;
@@ -1260,10 +1356,14 @@ function ProjectWorkspace({
       </button>
 
       <AgentPanel
+        activeAskConversationId={activeAskConversationId}
+        askConversations={askConversations}
         askMessages={askMessages}
         askResult={askResult}
         interpretation={interpretation}
         onAsk={onAsk}
+        onNewAskConversation={onNewAskConversation}
+        onSelectAskConversation={onSelectAskConversation}
         onSetQuestion={onSetQuestion}
         question={question}
         repoMap={repoMap}
@@ -1315,19 +1415,27 @@ function ManualTracePanel({ events, streaming }: { events: TraceEvent[]; streami
 }
 
 function AgentPanel({
+  activeAskConversationId,
+  askConversations,
   askMessages,
   askResult,
   interpretation,
   onAsk,
+  onNewAskConversation,
+  onSelectAskConversation,
   onSetQuestion,
   question,
   repoMap,
   status,
 }: {
+  activeAskConversationId: string | null;
+  askConversations: AskConversation[];
   askMessages: AskMessage[];
   askResult: AskModeResult | null;
   interpretation: Interpretation | null;
   onAsk: () => void;
+  onNewAskConversation: () => void;
+  onSelectAskConversation: (conversationId: string) => void;
   onSetQuestion: (question: string) => void;
   question: string;
   repoMap: RepoMap | null;
@@ -1354,6 +1462,28 @@ function AgentPanel({
             : `${interpretation?.used_llm ? "LLM" : "规则"} · ${interpretation?.task_id ?? "待命"}`}
         </span>
       </header>
+
+      <div className="ask-conversation-bar">
+        <select
+          aria-label="选择 Ask 对话"
+          disabled={!askConversations.length}
+          onChange={(event) => onSelectAskConversation(event.target.value)}
+          value={activeAskConversationId ?? ""}
+        >
+          {askConversations.length ? (
+            askConversations.map((conversation) => (
+              <option key={conversation.id} value={conversation.id}>
+                {conversation.title}
+              </option>
+            ))
+          ) : (
+            <option value="">暂无对话</option>
+          )}
+        </select>
+        <button disabled={!repoMap || status === "importing" || status === "loading"} onClick={onNewAskConversation} type="button">
+          新对话
+        </button>
+      </div>
 
       <div className="ask-scroll-area">
         <div className="ask-thread">
@@ -1388,38 +1518,38 @@ function AgentPanel({
         </div>
 
         <div className="ask-context">
-        <details>
-          <summary>{askResult ? "Ask Trace" : "Planner / Context"}</summary>
-          <div className="step-list">
-            {askResult?.trace_events.slice(0, 6).map((item) => (
-              <div className="step-row" data-status={item.status} key={`${item.index}-${item.title}`}>
-                <span>{item.stage}</span>
-                <strong>{item.title}</strong>
-                <small>{item.summary}</small>
-              </div>
-            )) ??
-              interpretation?.analysis_plan?.slice(0, 4).map((item) => (
-              <div className="step-row" data-status="success" key={`${item.order}-${item.title}`}>
-                <span>{item.actor}</span>
-                <strong>{item.title}</strong>
-                <small>{item.description}</small>
-              </div>
-            )) ?? <span className="muted">创建分析任务后会显示 Planner 输出</span>}
-          </div>
-          <div className="mini-list">
-            {askResult ? <code>{intentLabel(askResult.intent)}</code> : null}
-            {askResult?.resolved_query ? <code>Resolved</code> : null}
-            {askResult?.context_pack ? <code>{askResult.context_pack.truncated ? "Context trimmed" : "Context Pack"}</code> : null}
-            {askResult?.tool_calls.slice(0, 4).map((call, index) => (
-              <code key={`${call.tool_name}-${index}`}>{call.tool_name}</code>
-            ))}
-            {askResult?.routed_skills.slice(0, 4).map((skill) => (
-              <code key={`ask-${skill.name}`}>{skill.name}</code>
-            ))}
-            {(interpretation?.active_skills?.length ? interpretation.active_skills.map((skill) => skill.name) : interpretation?.selected_skills)?.map((skill) => <code key={skill}>{skill}</code>) ?? null}
-            {askResult ? <span className="muted">{askResult.code_evidence.length || askResult.references.length} 条 Ask evidence · {askResult.session_memory.turns.length} 轮记忆</span> : null}
-            {interpretation?.context_snapshot ? (
-              <span className="muted">
+          <details>
+            <summary>{askResult ? "Ask Trace" : "Planner / Context"}</summary>
+            <div className="step-list">
+              {askResult?.trace_events.slice(0, 6).map((item) => (
+                <div className="step-row" data-status={item.status} key={`${item.index}-${item.title}`}>
+                  <span>{item.stage}</span>
+                  <strong>{item.title}</strong>
+                  <small>{item.summary}</small>
+                </div>
+              )) ??
+                interpretation?.analysis_plan?.slice(0, 4).map((item) => (
+                  <div className="step-row" data-status="success" key={`${item.order}-${item.title}`}>
+                    <span>{item.actor}</span>
+                    <strong>{item.title}</strong>
+                    <small>{item.description}</small>
+                  </div>
+                )) ?? <span className="muted">创建分析任务后会显示 Planner 输出</span>}
+            </div>
+            <div className="mini-list">
+              {askResult ? <code>{intentLabel(askResult.intent)}</code> : null}
+              {askResult?.resolved_query ? <code>Resolved</code> : null}
+              {askResult?.context_pack ? <code>{askResult.context_pack.truncated ? "Context trimmed" : "Context Pack"}</code> : null}
+              {askResult?.tool_calls.slice(0, 4).map((call, index) => (
+                <code key={`${call.tool_name}-${index}`}>{call.tool_name}</code>
+              ))}
+              {askResult?.routed_skills.slice(0, 4).map((skill) => (
+                <code key={`ask-${skill.name}`}>{skill.name}</code>
+              ))}
+              {(interpretation?.active_skills?.length ? interpretation.active_skills.map((skill) => skill.name) : interpretation?.selected_skills)?.map((skill) => <code key={skill}>{skill}</code>) ?? null}
+              {askResult ? <span className="muted">{askResult.code_evidence.length || askResult.references.length} 条 Ask evidence · {askResult.session_memory.turns.length} 轮记忆</span> : null}
+              {interpretation?.context_snapshot ? (
+                <span className="muted">
                   {interpretation.context_snapshot.evidence_count} 条 evidence · {interpretation.context_snapshot.read_files.length} 个已读取文件
                 </span>
               ) : null}
@@ -1451,24 +1581,6 @@ function AgentPanel({
               </p>
             ) : null}
           </details>
-
-        <details>
-          <summary>{askResult ? "相关文件 / 实现路径" : "阅读路径"}</summary>
-          <ol>
-            {askResult?.implementation_path.slice(0, 8).map((path, index) => (
-              <li key={`${index}-${path}`}>
-                <code>{path}</code>
-                <span>{askResult.related_files.includes(path) ? "相关文件" : "候选链路"}</span>
-              </li>
-            )) ??
-              (interpretation?.report?.reading_route ?? interpretation?.reading_path)?.slice(0, 6).map((item) => (
-              <li key={`${item.order}-${item.path}`}>
-                <code>{item.path}</code>
-                <span>{item.reason}</span>
-              </li>
-            ))}
-          </ol>
-        </details>
         </div>
       </div>
 
@@ -2155,6 +2267,21 @@ function normalizeAskStreamEvent(event: AskStreamEvent): AskStreamEvent {
     return { ...event, answer: event.event.answer };
   }
   return event;
+}
+
+function messagesFromConversation(conversation: AskConversation): AskMessage[] {
+  return conversation.messages.map((message) => ({
+    id: message.id,
+    role: message.role,
+    body: message.body,
+    meta: message.meta ?? undefined,
+  }));
+}
+
+function upsertAskConversation(items: AskConversation[], conversation: AskConversation): AskConversation[] {
+  const exists = items.some((item) => item.id === conversation.id);
+  const next = exists ? items.map((item) => (item.id === conversation.id ? conversation : item)) : [conversation, ...items];
+  return [...next].sort((left, right) => right.updated_at.localeCompare(left.updated_at));
 }
 
 async function patchJson<T>(path: string, body: unknown): Promise<T> {

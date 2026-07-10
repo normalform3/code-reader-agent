@@ -240,6 +240,45 @@ class ProjectSessionUpdate(BaseModel):
     last_error: str | None = None
 
 
+class AskConversationMessage(BaseModel):
+    """A persisted Ask chat message without tool output or code context."""
+
+    id: str
+    role: Literal["user", "assistant"]
+    body: str
+    meta: str | None = None
+    created_at: str
+
+
+class AskConversation(BaseModel):
+    """One Ask conversation under a project analysis session."""
+
+    id: str
+    project_id: str
+    project_path: str
+    title: str
+    messages: list[AskConversationMessage] = Field(default_factory=list)
+    session_memory: "SessionMemory"
+    last_question: str | None = None
+    created_at: str
+    updated_at: str
+
+
+class AskConversationCreate(BaseModel):
+    """Input for creating a new Ask conversation."""
+
+    title: str | None = None
+
+
+class AskConversationUpdate(BaseModel):
+    """Patchable fields for an Ask conversation."""
+
+    title: str | None = None
+    messages: list[AskConversationMessage] | None = None
+    session_memory: SessionMemory | None = None
+    last_question: str | None = None
+
+
 class RegistryItemCreate(BaseModel):
     """Input for creating a custom tool or skill registry item."""
 
@@ -852,6 +891,7 @@ class AskModeRequest(BaseModel):
 
     project_path: str
     question: str
+    conversation_id: str | None = None
     session_memory: SessionMemory | None = None
 
 

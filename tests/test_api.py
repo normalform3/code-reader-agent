@@ -490,6 +490,70 @@ def test_agent_ask_stream_api_returns_sse_progress_and_final_payload(tmp_path: P
     assert payload["event"]["answer"]
 
 
+def test_agent_ask_conversations_keep_session_memory_isolated(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+    write_minimal_java_project(tmp_path)
+
+    project_response = client.post(
+        "/api/projects/history",
+        json={"project_name": "demo-service", "project_path": str(tmp_path), "title": "demo-service"},
+    )
+    assert project_response.status_code == 200
+    project_id = project_response.json()["id"]
+    first_conversation = client.post(f"/api/projects/{project_id}/ask-conversations", json={"title": "登录流程"}).json()
+    second_conversation = client.post(f"/api/projects/{project_id}/ask-conversations", json={"title": "配置位置"}).json()
+
+    first_response = client.post(
+        "/api/agent/ask/stream",
+        json={"project_path": str(tmp_path), "question": "登录流程怎么走？", "conversation_id": first_conversation["id"]},
+    )
+    second_response = client.post(
+        "/api/agent/ask/stream",
+        json={"project_path": str(tmp_path), "question": "数据库配置在哪里？", "conversation_id": second_conversation["id"]},
+    )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    conversations = client.get(f"/api/projects/{project_id}/ask-conversations").json()
+    by_id = {item["id"]: item for item in conversations}
+    assert [turn["intent"] for turn in by_id[first_conversation["id"]]["session_memory"]["turns"]] == ["flow_trace"]
+    assert [turn["intent"] for turn in by_id[second_conversation["id"]]["session_memory"]["turns"]] == ["config_lookup"]
+    assert len(by_id[first_conversation["id"]]["messages"]) == 2
+    assert len(by_id[second_conversation["id"]]["messages"]) == 2
+
+
+def test_agent_ask_stream_updates_only_target_conversation(tmp_path: Path, monkeypatch: Any) -> None:
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+    write_minimal_java_project(tmp_path)
+
+    project_id = client.post(
+        "/api/projects/history",
+        json={"project_name": "demo-service", "project_path": str(tmp_path), "title": "demo-service"},
+    ).json()["id"]
+    target = client.post(f"/api/projects/{project_id}/ask-conversations", json={"title": "目标会话"}).json()
+    untouched = client.post(f"/api/projects/{project_id}/ask-conversations", json={"title": "空会话"}).json()
+
+    response = client.post(
+        "/api/agent/ask/stream",
+        json={"project_path": str(tmp_path), "question": "UserController 是做什么的？", "conversation_id": target["id"]},
+    )
+
+    assert response.status_code == 200
+    final_payload = _final_sse_payload(response.text)
+    assert final_payload["conversation"]["id"] == target["id"]
+    conversations = client.get(f"/api/projects/{project_id}/ask-conversations").json()
+    by_id = {item["id"]: item for item in conversations}
+    assert by_id[target["id"]]["session_memory"]["turns"][-1]["intent"] == "file_explanation"
+    assert by_id[untouched["id"]]["session_memory"]["turns"] == []
+    assert "context_pack" not in by_id[target["id"]]
+    assert "code_evidence" not in by_id[target["id"]]
+    assert "tool_calls" not in by_id[target["id"]]
+
+
 def test_agent_ask_stream_api_returns_error_event_for_invalid_path(tmp_path: Path) -> None:
     response = client.post(
         "/api/agent/ask/stream",
@@ -499,6 +563,13 @@ def test_agent_ask_stream_api_returns_error_event_for_invalid_path(tmp_path: Pat
     assert response.status_code == 200
     assert "event: error" in response.text
     assert "Project path does not exist" in response.text
+
+
+def _final_sse_payload(text: str) -> dict[str, Any]:
+    frames = [frame for frame in text.split("\n\n") if frame.strip()]
+    final_frame = next(frame for frame in frames if frame.startswith("event: final"))
+    data_line = next(line for line in final_frame.splitlines() if line.startswith("data: "))
+    return json.loads(data_line.removeprefix("data: "))
 
 
 def test_agent_run_stream_api_returns_sse_progress_and_project_manual(tmp_path: Path, monkeypatch: Any) -> None:
