@@ -236,16 +236,17 @@ UI：
 
 报告生成后，右侧 Ask 边栏不再重新执行完整报告流程，而是进入基于项目记忆的追问流程。
 
-当前实现位于 `code_reader_agent.runtime.ask_mode`，使用 LangGraph `StateGraph` 表达节点；当本地依赖暂时不可用时，runtime 使用同顺序 fallback 方便离线测试。
+当前实现位于 `code_reader_agent.runtime.ask_mode`，通过编译后的 LangGraph `StateGraph` 执行；缺少 LangGraph 或关键 LLM 阶段失败时 Ask 返回服务不可用，不运行规则型 Ask fallback。
 
 节点职责：
 
-- `IntentClassifier`：把用户问题识别为项目总览、模块解释、文件解释、调用链、接口、配置或技术栈。
+- `LLMIntentClassifier`：把用户问题识别为项目总览、模块解释、文件解释、调用链、接口、配置或技术栈，并输出受模型约束校验的 `IntentResult`。
 - `ContextRetriever`：优先检索 Project Memory、Module Summary、File Summary、API Index、Flow Index 和 Session Memory。
-- `ToolPlanner`：判断记忆是否足够；不足时规划只读工具调用。
+- `LLMToolPlanner`：基于意图、检索上下文和已裁剪工具结果，最多 3 轮、8 次地决定 safe/read 工具调用。
 - `EvidenceCollector`：执行 `read_file`、`search_keyword`、`search_symbol`、`parse_dependencies`、`parse_routes`、`parse_api_calls`、`parse_controller`、`parse_mapper` 等只读工具。
-- `AnswerComposer`：优先调用模型设置中的百炼模型，基于 `ContextPack` 输出直接回答、相关文件、候选实现路径、关键代码说明和参考依据；模型不可用时降级为确定性模板。
-- `MemoryUpdater`：保存最近问题、意图、引用文件、引用 API 和回答摘要，支持跨轮追问。
+- `AnswerComposer`：调用模型设置中的百炼模型，基于 `ContextPack` 输出直接回答、相关文件、候选实现路径、关键代码说明和参考依据。
+- `MemoryUpdater`：保存当前问题、意图、引用文件、引用 API 和回答摘要。
+- `SessionSummarizer`：超过最近 8 轮滑窗时，将早期轮次和旧摘要压缩为持久历史摘要；摘要失败时保留旧摘要或丢弃超窗轮次并发出 warning。
 
 Ask 模式边界：
 

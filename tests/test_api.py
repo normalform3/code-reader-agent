@@ -447,22 +447,8 @@ def test_agent_ask_api_returns_intent_answer_and_session_memory(tmp_path: Path, 
         json={"project_path": str(tmp_path), "question": "项目用了哪些技术栈？"},
     )
 
-    assert ask_response.status_code == 200
-    payload = ask_response.json()
-    assert payload["intent"] == "tech_stack"
-    assert payload["answer"]
-    assert payload["resolved_query"]["resolved_question"] == "项目用了哪些技术栈？"
-    assert payload["intent_result"]["intent"] == "tech_stack"
-    assert payload["tool_plan"]["need_tools"] is True
-    assert payload["context_pack"]["project_context"]
-    assert "code_evidence" in payload
-    assert payload["tool_calls"]
-    assert payload["tool_calls"][0]["reason"]
-    assert payload["session_memory"]["turns"][-1]["intent"] == "tech_stack"
-    assert payload["trace_events"]
-    assert payload["used_llm"] is False
-    assert payload["fallback_used"] is True
-    assert payload["llm_model"] == "glm-5.1"
+    assert ask_response.status_code == 503
+    assert "Ask LLM is not configured" in ask_response.json()["detail"]
 
 
 def test_agent_ask_stream_api_returns_sse_progress_and_final_payload(tmp_path: Path, monkeypatch: Any) -> None:
@@ -479,15 +465,8 @@ def test_agent_ask_stream_api_returns_sse_progress_and_final_payload(tmp_path: P
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     frames = [frame for frame in response.text.split("\n\n") if frame.strip()]
-    assert any(frame.startswith("event: trace") for frame in frames)
-    assert any(frame.startswith("event: tool_plan") for frame in frames)
-    assert any(frame.startswith("event: tool_result") for frame in frames)
-    assert frames[-1].startswith("event: final")
-    data_line = next(line for line in frames[-1].splitlines() if line.startswith("data: "))
-    payload = json.loads(data_line.removeprefix("data: "))
-    assert payload["type"] == "final"
-    assert payload["event"]["intent"] == "file_explanation"
-    assert payload["event"]["answer"]
+    assert frames[-1].startswith("event: error")
+    assert "Ask LLM is not configured" in frames[-1]
 
 
 def test_agent_ask_conversations_keep_session_memory_isolated(tmp_path: Path, monkeypatch: Any) -> None:
@@ -518,10 +497,10 @@ def test_agent_ask_conversations_keep_session_memory_isolated(tmp_path: Path, mo
     assert second_response.status_code == 200
     conversations = client.get(f"/api/projects/{project_id}/ask-conversations").json()
     by_id = {item["id"]: item for item in conversations}
-    assert [turn["intent"] for turn in by_id[first_conversation["id"]]["session_memory"]["turns"]] == ["flow_trace"]
-    assert [turn["intent"] for turn in by_id[second_conversation["id"]]["session_memory"]["turns"]] == ["config_lookup"]
-    assert len(by_id[first_conversation["id"]]["messages"]) == 2
-    assert len(by_id[second_conversation["id"]]["messages"]) == 2
+    assert by_id[first_conversation["id"]]["session_memory"]["turns"] == []
+    assert by_id[second_conversation["id"]]["session_memory"]["turns"] == []
+    assert by_id[first_conversation["id"]]["messages"] == []
+    assert by_id[second_conversation["id"]]["messages"] == []
 
 
 def test_agent_ask_stream_updates_only_target_conversation(tmp_path: Path, monkeypatch: Any) -> None:
@@ -543,11 +522,10 @@ def test_agent_ask_stream_updates_only_target_conversation(tmp_path: Path, monke
     )
 
     assert response.status_code == 200
-    final_payload = _final_sse_payload(response.text)
-    assert final_payload["conversation"]["id"] == target["id"]
+    assert "event: error" in response.text
     conversations = client.get(f"/api/projects/{project_id}/ask-conversations").json()
     by_id = {item["id"]: item for item in conversations}
-    assert by_id[target["id"]]["session_memory"]["turns"][-1]["intent"] == "file_explanation"
+    assert by_id[target["id"]]["session_memory"]["turns"] == []
     assert by_id[untouched["id"]]["session_memory"]["turns"] == []
     assert "context_pack" not in by_id[target["id"]]
     assert "code_evidence" not in by_id[target["id"]]

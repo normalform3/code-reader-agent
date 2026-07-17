@@ -2,45 +2,17 @@
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterator
+from functools import lru_cache
 from typing import Any, NotRequired, TypedDict
 
 try:
     from langgraph.graph import END, StateGraph
-except ModuleNotFoundError:  # pragma: no cover - exercised only when dependency installation is blocked.
-    END = "__end__"
-
-    class StateGraph:  # type: ignore[no-redef]
-        """Small sequential fallback used only when langgraph is not installed."""
-
-        def __init__(self, _schema: object) -> None:
-            self._nodes: dict[str, Any] = {}
-            self._edges: dict[str, str] = {}
-            self._entry = ""
-
-        def add_node(self, name: str, node: Any) -> None:
-            self._nodes[name] = node
-
-        def add_edge(self, start: str, end: str) -> None:
-            self._edges[start] = end
-
-        def set_entry_point(self, name: str) -> None:
-            self._entry = name
-
-        def compile(self) -> Any:
-            graph = self
-
-            class _CompiledGraph:
-                def invoke(self, state: dict[str, Any]) -> dict[str, Any]:
-                    current = graph._entry
-                    next_state = dict(state)
-                    while current and current != END:
-                        next_state = graph._nodes[current](next_state)
-                        current = graph._edges.get(current, END)
-                    return next_state
-
-            return _CompiledGraph()
+except ModuleNotFoundError:  # pragma: no cover - depends on the local runtime.
+    END = None
+    StateGraph = None  # type: ignore[assignment,misc]
 
 from code_reader_agent.local_state import (
     get_model_settings,
@@ -80,10 +52,13 @@ from code_reader_agent.runtime.llm_client import LLMConfigurationError, LiteLLMC
 from code_reader_agent.skills.registry import KNOWLEDGE_INDEX_VERSION, default_skill_registry
 from code_reader_agent.tools.executor import ToolExecutor
 from code_reader_agent.tools.models import ToolExecutionContext
+from code_reader_agent.tools.registry import default_tool_registry
 
 
 CONTEXT_PACK_CHAR_BUDGET = 12_000
 MAX_TOOL_CALLS = 8
+MAX_TOOL_ROUNDS = 3
+SESSION_TURN_WINDOW = 8
 FOLLOWUP_MARKERS = ("这个", "那个", "那", "它", "这里", "那里", "上面", "刚才", "继续", "this", "that", "it")
 IMPLEMENTATION_MARKERS = (
     "实现",
@@ -109,6 +84,14 @@ LEGACY_INTENTS: dict[str, AskIntent] = {
 }
 
 
+class AskWorkflowError(RuntimeError):
+    """Raised when Ask cannot complete its required LangGraph/LLM workflow."""
+
+
+class AskWorkflowUnavailableError(AskWorkflowError):
+    """Raised when LangGraph or the configured LLM is unavailable."""
+
+
 class AskState(TypedDict):
     project_path: str
     question: str
@@ -129,6 +112,11 @@ class AskState(TypedDict):
     related_flows: NotRequired[list[str]]
     implementation_path: NotRequired[list[str]]
     tool_plan: NotRequired[ToolPlan]
+    planned_tool_calls: NotRequired[list[PlannedToolCall]]
+    planner_messages: NotRequired[list[dict[str, Any]]]
+    pending_tool_call_ids: NotRequired[list[str]]
+    tool_rounds: NotRequired[int]
+    tool_planning_complete: NotRequired[bool]
     references: NotRequired[list[EvidenceRef]]
     tool_calls: NotRequired[list[ToolCallRecord]]
     code_evidence: NotRequired[list[CodeEvidence]]
@@ -154,8 +142,9 @@ def run_ask_mode(
 ) -> AskModeResult:
     """Run the structured Ask workflow for a project question."""
 
+    _ensure_ask_runtime()
     state = _initial_ask_state(project_path, question, session_memory, persist_session_memory=persist_session_memory)
-    state = _run_ask_nodes(state)
+    state = _compiled_ask_graph().invoke(state)
     return _ask_result_from_state(state)
 
 
@@ -168,21 +157,28 @@ def run_ask_mode_events(
 ) -> Iterator[dict[str, Any]]:
     """Run Ask mode and yield public progress events plus the final result."""
 
+    _ensure_ask_runtime()
     state = _initial_ask_state(project_path, question, session_memory, persist_session_memory=persist_session_memory)
-    for node_name, node in _ask_node_sequence():
-        before_trace_count = len(state.get("trace_events", []))
-        before_tool_count = len(state.get("tool_calls", []))
-        state = node(state)
-        for trace in state.get("trace_events", [])[before_trace_count:]:
-            yield {"type": "trace", "node": node_name, "event": trace.model_dump()}
-        if node_name == "ToolPlanner" and state.get("tool_plan"):
-            yield {"type": "tool_plan", "node": node_name, "event": state["tool_plan"].model_dump()}
-        if node_name == "EvidenceCollector":
-            for call in state.get("tool_calls", [])[before_tool_count:]:
-                yield {"type": "tool_result", "node": node_name, "event": call.model_dump()}
-        if node_name == "AnswerComposer":
-            yield {"type": "answer", "node": node_name, "event": {"answer": state.get("answer", "")}}
-    yield {"type": "final", "event": _ask_result_from_state(state).model_dump()}
+    final_state = state
+    emitted_trace_count = 0
+    emitted_tool_count = 0
+    for update in _compiled_ask_graph().stream(state, stream_mode="updates"):
+        for node_name, node_state in update.items():
+            final_state = node_state
+            traces = node_state.get("trace_events", [])
+            for trace in traces[emitted_trace_count:]:
+                yield {"type": "trace", "node": node_name, "event": trace.model_dump()}
+            emitted_trace_count = len(traces)
+            if node_name == "LLMToolPlanner" and node_state.get("tool_plan"):
+                yield {"type": "tool_plan", "node": node_name, "event": node_state["tool_plan"].model_dump()}
+            if node_name == "EvidenceCollector":
+                calls = node_state.get("tool_calls", [])
+                for call in calls[emitted_tool_count:]:
+                    yield {"type": "tool_result", "node": node_name, "event": call.model_dump()}
+                emitted_tool_count = len(calls)
+            if node_name == "AnswerComposer":
+                yield {"type": "answer", "node": node_name, "event": {"answer": node_state.get("answer", "")}}
+    yield {"type": "final", "event": _ask_result_from_state(final_state).model_dump()}
 
 
 def _initial_ask_state(
@@ -221,15 +217,13 @@ def _initial_ask_state(
         "key_code_notes": [],
         "warnings": [],
         "trace_events": [],
+        "planner_messages": [],
+        "pending_tool_call_ids": [],
+        "planned_tool_calls": [],
+        "tool_rounds": 0,
+        "tool_planning_complete": False,
         "persist_session_memory": persist_session_memory,
     }
-
-
-def _run_ask_nodes(state: AskState) -> AskState:
-    next_state = state
-    for _node_name, node in _ask_node_sequence():
-        next_state = node(next_state)
-    return next_state
 
 
 def _ask_result_from_state(state: AskState) -> AskModeResult:
@@ -284,28 +278,49 @@ def normalize_ask_intent(intent: str) -> AskIntent:
     return LEGACY_INTENTS.get(intent, intent)  # type: ignore[return-value]
 
 
+@lru_cache(maxsize=1)
+def _compiled_ask_graph() -> Any:
+    """Compile the Ask workflow once for the current process."""
+
+    return _build_graph()
+
+
 def _build_graph() -> Any:
+    if StateGraph is None or END is None:
+        raise AskWorkflowUnavailableError("langgraph is not installed; Ask requires the compiled LangGraph workflow.")
     graph = StateGraph(AskState)
     graph.add_node("QueryRewriter", _query_rewriter)
-    graph.add_node("IntentClassifier", _intent_classifier)
+    graph.add_node("LLMIntentClassifier", _llm_intent_classifier)
     graph.add_node("SkillRouter", _skill_router)
     graph.add_node("ContextRetriever", _context_retriever)
-    graph.add_node("ToolPlanner", _tool_planner)
+    graph.add_node("LLMToolPlanner", _llm_tool_planner)
     graph.add_node("EvidenceCollector", _evidence_collector)
     graph.add_node("ContextBuilder", _context_builder)
     graph.add_node("AnswerComposer", _answer_composer)
     graph.add_node("MemoryUpdater", _memory_updater)
+    graph.add_node("SessionSummarizer", _session_summarizer)
     graph.set_entry_point("QueryRewriter")
-    graph.add_edge("QueryRewriter", "IntentClassifier")
-    graph.add_edge("IntentClassifier", "SkillRouter")
+    graph.add_edge("QueryRewriter", "LLMIntentClassifier")
+    graph.add_edge("LLMIntentClassifier", "SkillRouter")
     graph.add_edge("SkillRouter", "ContextRetriever")
-    graph.add_edge("ContextRetriever", "ToolPlanner")
-    graph.add_edge("ToolPlanner", "EvidenceCollector")
-    graph.add_edge("EvidenceCollector", "ContextBuilder")
+    graph.add_edge("ContextRetriever", "LLMToolPlanner")
+    graph.add_conditional_edges(
+        "LLMToolPlanner",
+        _tool_planning_route,
+        {"collect": "EvidenceCollector", "build": "ContextBuilder"},
+    )
+    graph.add_edge("EvidenceCollector", "LLMToolPlanner")
     graph.add_edge("ContextBuilder", "AnswerComposer")
     graph.add_edge("AnswerComposer", "MemoryUpdater")
-    graph.add_edge("MemoryUpdater", END)
+    graph.add_edge("MemoryUpdater", "SessionSummarizer")
+    graph.add_edge("SessionSummarizer", END)
     return graph.compile()
+
+
+def _ensure_ask_runtime() -> None:
+    if StateGraph is None:
+        raise AskWorkflowUnavailableError("langgraph is not installed; Ask requires LangGraph.")
+    _configured_llm_client()
 
 
 def _query_rewriter(state: AskState) -> AskState:
@@ -344,13 +359,38 @@ def _query_rewriter(state: AskState) -> AskState:
     }
 
 
-def _intent_classifier(state: AskState) -> AskState:
-    intent_result = _classify_intent_result(state["resolved_query"], state["project_memory"], state.get("session_memory"))
+def _llm_intent_classifier(state: AskState) -> AskState:
+    client = _configured_llm_client()
+    prompt = {
+        "question": state["resolved_query"].resolved_question,
+        "project": _project_context(state["project_memory"]),
+        "session": _session_context(state["session_memory"]),
+        "allowed_intents": [
+            "project_overview", "module_explanation", "file_explanation", "api_lookup", "flow_trace",
+            "config_lookup", "tech_stack", "symbol_lookup", "unknown",
+        ],
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You classify CodeReader Ask questions. Return JSON only matching IntentResult: "
+                "intent, keywords, possible_files, possible_apis, possible_symbols, need_code_evidence. "
+                "Use only the allowed intent values and make conservative claims."
+            ),
+        },
+        {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)},
+    ]
+    try:
+        intent_result = IntentResult.model_validate(_parse_json_response(_extract_llm_text(client.complete(messages, tools=[]))))
+    except Exception as exc:
+        raise AskWorkflowError(f"Ask intent classification failed: {exc}") from exc
     return {
         **state,
         "intent": intent_result.intent,
         "intent_result": intent_result,
-        "trace_events": _append_trace(state, "Intent Classifier", intent_result.intent, f"Question classified as {intent_result.intent}."),
+        "llm_model": client.config.model,
+        "trace_events": _append_trace(state, "LLM Intent Classifier", intent_result.intent, f"LLM classified the question as {intent_result.intent}."),
     }
 
 
@@ -503,66 +543,76 @@ def _context_retriever(state: AskState) -> AskState:
     }
 
 
-def _tool_planner(state: AskState) -> AskState:
-    intent_result = state["intent_result"]
-    resolved = state["resolved_query"]
-    question = resolved.resolved_question
-    related_files = state.get("related_files", [])
-    related_apis = state.get("related_apis", [])
-    planned: list[PlannedToolCall] = []
+def _llm_tool_planner(state: AskState) -> AskState:
+    """Ask the LLM whether another bounded batch of safe read tools is needed."""
 
-    def add(tool_name: str, args: dict[str, object], purpose: str, priority: int = 0) -> None:
-        key = (tool_name, tuple(sorted(args.items())))
-        if any((item.tool_name, tuple(sorted(item.args.items()))) == key for item in planned):
-            return
-        planned.append(PlannedToolCall(tool_name=tool_name, args=args, purpose=purpose, priority=priority))
+    used_calls = len(state.get("tool_calls", []))
+    rounds = state.get("tool_rounds", 0)
+    if rounds >= MAX_TOOL_ROUNDS or used_calls >= MAX_TOOL_CALLS:
+        warning = f"LLM tool planning stopped at {rounds} rounds and {used_calls} tool calls."
+        return _complete_tool_planning(state, warning)
 
-    for skill_plan in default_skill_registry().collect_tool_plans(resolved, state.get("retrieved_context", []), state.get("routed_skills", [])):
-        add(skill_plan.tool_name, skill_plan.args, skill_plan.purpose, skill_plan.priority or 78)
+    client = _configured_llm_client()
+    messages = list(state.get("planner_messages", [])) or _initial_tool_planner_messages(state)
+    response = _complete_or_raise(client, messages, _ask_tool_schemas(), "tool planning")
+    raw_calls = _message_tool_calls(response)
+    content = _extract_llm_text(response)
+    if not raw_calls:
+        return {
+            **state,
+            "planner_messages": [*messages, _assistant_message_for_history(response, [])],
+            "tool_plan": ToolPlan(
+                need_tools=False,
+                reason="LLM determined that the current evidence is sufficient.",
+                tool_calls=state.get("planned_tool_calls", []),
+            ),
+            "tool_planning_complete": True,
+            "trace_events": _append_trace(state, "LLM Tool Planner", "工具规划完成", "LLM selected no further read-only tools."),
+        }
 
-    if intent_result.intent == "project_overview":
-        if not state.get("retrieved_context"):
-            add("list_files", {"max_depth": 2}, "项目记忆不足，补充目录结构。", 40)
-    elif intent_result.intent == "tech_stack":
-        add("parse_dependencies", {}, "确认依赖文件和技术栈证据。", 70)
-    elif intent_result.intent == "config_lookup":
-        add("parse_dependencies", {}, "读取配置和依赖摘要。", 80)
-        for path in related_files[:4]:
-            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 80}, "配置类问题需要读取真实配置片段。", 70)
-    elif intent_result.intent == "file_explanation":
-        for path in related_files[:4]:
-            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 140}, "用户询问指定文件，需要读取真实代码片段。", 90)
-        if not related_files:
-            add("search_symbol", {"symbol": _search_query(question)}, "文件记忆无法定位，按符号继续搜索。", 70)
-    elif intent_result.intent == "module_explanation":
-        for path in related_files[:4]:
-            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 120}, "模块解释涉及实现细节，读取关键文件补充证据。", 80)
-        add("search_keyword", {"keyword": _search_query(question)}, "搜索模块相关关键词补足上下文。", 70)
-    elif intent_result.intent == "api_lookup":
-        add("parse_api_calls", {}, "提取前端 axios/fetch/request 调用候选。", 85)
-        add("parse_controller", {}, "提取 Spring Controller 接口候选。", 85)
-        for api in related_apis[:3]:
-            add("search_api_path", {"api_path": api}, "接口定位需要搜索真实代码中的接口路径。", 80)
-    elif intent_result.intent == "flow_trace":
-        for path in related_files[:5]:
-            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 120}, "流程追踪需要读取关键文件作为链路依据。", 80)
-        add("search_keyword", {"keyword": _search_query(question)}, "搜索流程关键词补充链路候选。", 75)
-    elif intent_result.intent == "symbol_lookup":
-        symbol = intent_result.possible_symbols[0] if intent_result.possible_symbols else _search_query(question)
-        add("search_symbol", {"symbol": symbol}, "符号定位需要搜索真实源码。", 85)
-        for path in related_files[:3]:
-            add("read_file", {"relative_path": path, "start_line": 1, "end_line": 120}, "读取符号所在文件片段。", 75)
-    elif intent_result.need_code_evidence:
-        add("search_keyword", {"keyword": _search_query(question)}, "问题涉及具体实现，需要搜索真实代码。", 70)
-
-    planned = sorted(planned, key=lambda item: item.priority, reverse=True)[:MAX_TOOL_CALLS]
-    reason = "问题涉及具体实现或命中 Skill 建议，需要只读工具补充代码证据。" if planned else "项目记忆和索引足以回答该问题。"
-    plan = ToolPlan(need_tools=bool(planned), reason=reason, tool_calls=planned)
+    available = MAX_TOOL_CALLS - used_calls
+    permitted_calls = raw_calls[:available]
+    purpose = _public_tool_reason(content, state["intent"])
+    planned = [
+        PlannedToolCall(
+            tool_name=_tool_call_name(item),
+            args=_tool_call_arguments(item),
+            purpose=purpose,
+            priority=MAX_TOOL_CALLS - index,
+        )
+        for index, item in enumerate(permitted_calls)
+    ]
+    warnings = list(state.get("warnings", []))
+    if len(raw_calls) > len(permitted_calls):
+        warnings.append(f"LLM requested {len(raw_calls)} tools, but the {MAX_TOOL_CALLS}-call Ask budget only allowed {len(permitted_calls)}.")
+    assistant = _assistant_message_for_history(response, permitted_calls)
+    plan = ToolPlan(need_tools=bool(planned), reason=purpose, tool_calls=planned)
     return {
         **state,
+        "planner_messages": [*messages, assistant],
+        "pending_tool_call_ids": [_tool_call_id(item) for item in permitted_calls],
         "tool_plan": plan,
-        "trace_events": _append_trace(state, "Tool Planner", "只读工具计划", f"Planned {len(planned)} tool calls."),
+        "planned_tool_calls": [*state.get("planned_tool_calls", []), *planned],
+        "tool_rounds": rounds + 1,
+        "warnings": _dedupe_strings(warnings),
+        "trace_events": _append_trace(state, "LLM Tool Planner", "只读工具计划", f"LLM planned {len(planned)} safe read-only tool calls in round {rounds + 1}."),
     }
+
+
+def _complete_tool_planning(state: AskState, warning: str) -> AskState:
+    return {
+        **state,
+        "tool_plan": ToolPlan(need_tools=False, reason=warning, tool_calls=state.get("planned_tool_calls", [])),
+        "tool_planning_complete": True,
+        "warnings": _dedupe_strings([*state.get("warnings", []), warning]),
+        "trace_events": _append_trace(state, "LLM Tool Planner", "工具预算已用尽", warning),
+    }
+
+
+def _tool_planning_route(state: AskState) -> str:
+    if state.get("tool_plan", ToolPlan(need_tools=False, reason="")).need_tools:
+        return "collect"
+    return "build"
 
 
 def _evidence_collector(state: AskState) -> AskState:
@@ -573,6 +623,8 @@ def _evidence_collector(state: AskState) -> AskState:
     warnings = list(state.get("warnings", []))
     code_evidence = list(state.get("code_evidence", []))
     notes = list(state.get("key_code_notes", []))
+    planner_messages = list(state.get("planner_messages", []))
+    pending_ids = list(state.get("pending_tool_call_ids", []))
     executor = ToolExecutor()
     execution_context = ToolExecutionContext(
         project_path=state["project_path"],
@@ -581,7 +633,7 @@ def _evidence_collector(state: AskState) -> AskState:
         project_memory=state["project_memory"],
     )
 
-    for planned in state.get("tool_plan", ToolPlan(need_tools=False, reason="")).tool_calls:
+    for index, planned in enumerate(state.get("tool_plan", ToolPlan(need_tools=False, reason="")).tool_calls):
         result = executor.execute(planned, execution_context)
         if result.tool_call:
             tool_calls.append(result.tool_call)
@@ -591,6 +643,13 @@ def _evidence_collector(state: AskState) -> AskState:
         warnings.extend(result.warnings)
         code_evidence.extend(result.evidence)
         notes.extend(result.notes)
+        planner_messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": pending_ids[index] if index < len(pending_ids) else f"ask-tool-{index}",
+                "content": json.dumps(_tool_result_for_planner(result), ensure_ascii=False),
+            }
+        )
 
     return {
         **state,
@@ -601,6 +660,8 @@ def _evidence_collector(state: AskState) -> AskState:
         "warnings": _dedupe_strings(warnings),
         "code_evidence": _dedupe_code_evidence(code_evidence),
         "key_code_notes": _dedupe_strings(notes),
+        "planner_messages": planner_messages,
+        "pending_tool_call_ids": [],
         "trace_events": _append_trace(state, "Evidence Collector", "工具执行", f"Executed {len(state.get('tool_plan', ToolPlan(need_tools=False, reason='')).tool_calls)} read-only tool calls."),
     }
 
@@ -645,12 +706,25 @@ def _context_builder(state: AskState) -> AskState:
 
 def _answer_composer(state: AskState) -> AskState:
     pack = state["context_pack"]
-    fallback_answer = _compose_answer(state["intent"], pack, state["project_memory"])
-    answer, used_llm, llm_model, warning = _compose_answer_with_llm(state["intent"], pack, fallback_answer)
+    client = _configured_llm_client()
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are CodeReader Agent Ask mode. Answer in Chinese using only the Context Pack and evidence. "
+                "Do not claim a complete call chain unless the evidence supports it. State uncertainty clearly."
+            ),
+        },
+        {
+            "role": "user",
+            "content": "\n".join([f"Intent: {state['intent']}", "Context Pack:", pack.context_text, "Answer requirements:", pack.answer_instructions]),
+        },
+    ]
+    answer = _extract_llm_text(_complete_or_raise(client, messages, [], "answer composition")).strip()
+    if not answer:
+        raise AskWorkflowError("Ask answer composition failed: LLM returned an empty answer.")
     notes = list(state.get("key_code_notes", []))
     warnings = list(state.get("warnings", []))
-    if warning:
-        warnings.append(warning)
     if _requires_fresh_code_evidence(state) and not _has_fresh_tool_evidence(state):
         warnings.append("项目认知可能过期，当前工作区未找到可用于确认该问题的实时代码证据。")
     if pack.code_evidence:
@@ -660,64 +734,19 @@ def _answer_composer(state: AskState) -> AskState:
     return {
         **state,
         "answer": answer,
-        "used_llm": used_llm,
-        "fallback_used": not used_llm,
-        "fallback_reason": warning if not used_llm else None,
-        "llm_model": llm_model,
+        "used_llm": True,
+        "fallback_used": False,
+        "fallback_reason": None,
+        "llm_model": client.config.model,
         "warnings": _dedupe_strings(warnings),
         "key_code_notes": _dedupe_strings(notes),
         "trace_events": _append_trace(
             state,
             "Answer Composer",
-            "LLM 证据化回答" if used_llm else "模板降级回答",
-            "Composed answer with Bailian LLM and Context Pack." if used_llm else (warning or "Composed deterministic fallback answer because LLM was unavailable."),
+            "LLM 证据化回答",
+            "Composed answer with the LLM from the evidence-grounded Context Pack.",
         ),
     }
-
-
-def _compose_answer_with_llm(intent: AskIntent, pack: ContextPack, fallback_answer: str) -> tuple[str, bool, str | None, str | None]:
-    settings = get_model_settings()
-    client = LiteLLMClient(model=settings.model)
-    llm_model = client.config.model
-    if not client.is_configured():
-        missing = " or ".join(client.missing_environment_variables())
-        return fallback_answer, False, llm_model, f"Missing {missing}; Ask answer used deterministic fallback."
-
-    messages = [
-        {
-            "role": "system",
-            "content": (
-                "You are CodeReader Agent Ask mode. Answer in Chinese. "
-                "Use only the provided Context Pack and evidence. "
-                "Do not claim precise full call chains unless the evidence supports it. "
-                "When evidence is weak, say so clearly. "
-                "Return plain text, not JSON."
-            ),
-        },
-        {
-            "role": "user",
-            "content": "\n".join(
-                [
-                    f"Intent: {intent}",
-                    "Context Pack:",
-                    pack.context_text,
-                    "Answer requirements:",
-                    pack.answer_instructions,
-                ]
-            ),
-        },
-    ]
-    try:
-        response = client.complete(messages, tools=[])
-    except LLMConfigurationError as exc:
-        return fallback_answer, False, llm_model, f"Ask LLM is not configured: {exc}"
-    except Exception as exc:
-        return fallback_answer, False, llm_model, f"Ask LLM call failed: {exc}"
-
-    content = _extract_llm_text(response).strip()
-    if not content:
-        return fallback_answer, False, llm_model, "Ask LLM returned an empty answer; deterministic fallback was used."
-    return content, True, llm_model, None
 
 
 def _extract_llm_text(response: Any) -> str:
@@ -735,6 +764,138 @@ def _extract_llm_text(response: Any) -> str:
         content = getattr(message, "content", None)
         return content if isinstance(content, str) else ""
     return ""
+
+
+def _configured_llm_client() -> LiteLLMClient:
+    client = LiteLLMClient(model=get_model_settings().model)
+    if not client.is_configured():
+        missing = " or ".join(client.missing_environment_variables())
+        raise AskWorkflowUnavailableError(f"Ask LLM is not configured: missing {missing}.")
+    return client
+
+
+def _complete_or_raise(client: LiteLLMClient, messages: list[dict[str, Any]], tools: list[dict[str, Any]], stage: str) -> Any:
+    try:
+        return client.complete(messages, tools=tools)
+    except LLMConfigurationError as exc:
+        raise AskWorkflowUnavailableError(f"Ask {stage} is unavailable: {exc}") from exc
+    except Exception as exc:
+        raise AskWorkflowError(f"Ask {stage} failed: {exc}") from exc
+
+
+def _parse_json_response(content: str) -> dict[str, Any]:
+    value = content.strip()
+    if value.startswith("```"):
+        value = value.split("\n", 1)[1] if "\n" in value else ""
+        value = value.rsplit("```", 1)[0].strip()
+    parsed = json.loads(value)
+    if not isinstance(parsed, dict):
+        raise ValueError("LLM response must be a JSON object.")
+    return parsed
+
+
+def _ask_tool_schemas() -> list[dict[str, Any]]:
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": tool.name,
+                "description": tool.description,
+                "parameters": tool.input_schema,
+            },
+        }
+        for tool in default_tool_registry().list_tools_by_mode("ask")
+        if tool.permission == "read" and tool.risk_level == "safe"
+    ]
+
+
+def _initial_tool_planner_messages(state: AskState) -> list[dict[str, Any]]:
+    payload = {
+        "intent": state["intent"],
+        "resolved_question": state["resolved_query"].resolved_question,
+        "project_context": _project_context(state["project_memory"]),
+        "session_context": _session_context(state["session_memory"]),
+        "retrieved_context": state.get("retrieved_context", [])[:20],
+        "related_files": state.get("related_files", [])[:12],
+        "related_apis": state.get("related_apis", [])[:8],
+        "skill_hints": [item.model_dump() for item in state.get("query_hints", [])[:12]],
+    }
+    return [
+        {
+            "role": "system",
+            "content": (
+                "You are the CodeReader Ask tool planner. Decide whether safe read-only tools are needed to answer the "
+                "question with evidence. Use only supplied function tools. Before calling tools, return at most one short "
+                "public reason sentence; do not reveal hidden reasoning. When evidence is sufficient, call no tool."
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+
+
+def _message_tool_calls(response: Any) -> list[Any]:
+    if isinstance(response, dict):
+        choices = response.get("choices") or []
+        message = choices[0].get("message") if choices and isinstance(choices[0], dict) else None
+        return list(message.get("tool_calls") or []) if isinstance(message, dict) else []
+    choices = getattr(response, "choices", None) or []
+    message = getattr(choices[0], "message", None) if choices else None
+    return list(getattr(message, "tool_calls", None) or [])
+
+
+def _tool_call_id(tool_call: Any) -> str:
+    value = tool_call.get("id") if isinstance(tool_call, dict) else getattr(tool_call, "id", "")
+    return str(value or "ask-tool")
+
+
+def _tool_call_name(tool_call: Any) -> str:
+    function = tool_call.get("function") if isinstance(tool_call, dict) else getattr(tool_call, "function", None)
+    return str(function.get("name") if isinstance(function, dict) else getattr(function, "name", "") or "")
+
+
+def _tool_call_arguments(tool_call: Any) -> dict[str, object]:
+    function = tool_call.get("function") if isinstance(tool_call, dict) else getattr(tool_call, "function", None)
+    raw = function.get("arguments") if isinstance(function, dict) else getattr(function, "arguments", "{}")
+    if isinstance(raw, dict):
+        return dict(raw)
+    try:
+        parsed = json.loads(str(raw or "{}"))
+    except json.JSONDecodeError:
+        return {}
+    return dict(parsed) if isinstance(parsed, dict) else {}
+
+
+def _assistant_message_for_history(response: Any, tool_calls: list[Any]) -> dict[str, Any]:
+    message: dict[str, Any] = {"role": "assistant", "content": _extract_llm_text(response) or None}
+    if tool_calls:
+        message["tool_calls"] = [
+            {
+                "id": _tool_call_id(call),
+                "type": "function",
+                "function": {"name": _tool_call_name(call), "arguments": json.dumps(_tool_call_arguments(call), ensure_ascii=False)},
+            }
+            for call in tool_calls
+        ]
+    return message
+
+
+def _public_tool_reason(content: str, intent: AskIntent) -> str:
+    text = " ".join(content.strip().split())
+    if text:
+        return text[:240]
+    return f"LLM 根据 {intent} 意图决定调用只读工具补充可验证代码证据。"
+
+
+def _tool_result_for_planner(result: Any) -> dict[str, Any]:
+    return {
+        "tool_name": result.tool_name,
+        "success": result.success,
+        "output_summary": result.output_summary,
+        "related_files": result.related_files[:12],
+        "evidence": [item.model_dump() for item in result.evidence[:8]],
+        "warnings": result.warnings[:8],
+        "error": result.error,
+    }
 
 
 def _memory_updater(state: AskState) -> AskState:
@@ -764,30 +925,71 @@ def _memory_updater(state: AskState) -> AskState:
             "last_question": state["question"],
             "last_resolved_question": state["resolved_query"].resolved_question,
             "last_answer_summary": answer_summary,
-            "turns": [*session_memory.turns[-8:], turn],
+            "turns": [*session_memory.turns, turn],
         }
     )
-    if state.get("persist_session_memory", True):
-        updated = save_session_memory(updated)
     return {
         **state,
         "session_memory": updated,
-        "trace_events": _append_trace(state, "Memory Updater", "Session Memory", f"Stored {len(updated.turns)} Ask turns."),
+        "trace_events": _append_trace(state, "Memory Updater", "Session Memory", f"Prepared {len(updated.turns)} Ask turns for persistence."),
     }
 
 
-def _ask_node_sequence() -> tuple[tuple[str, Any], ...]:
-    return (
-        ("QueryRewriter", _query_rewriter),
-        ("IntentClassifier", _intent_classifier),
-        ("SkillRouter", _skill_router),
-        ("ContextRetriever", _context_retriever),
-        ("ToolPlanner", _tool_planner),
-        ("EvidenceCollector", _evidence_collector),
-        ("ContextBuilder", _context_builder),
-        ("AnswerComposer", _answer_composer),
-        ("MemoryUpdater", _memory_updater),
-    )
+def _session_summarizer(state: AskState) -> AskState:
+    """Persist a compact LLM summary once the active turn window overflows."""
+
+    session_memory = state["session_memory"]
+    overflow = session_memory.turns[:-SESSION_TURN_WINDOW]
+    retained_turns = session_memory.turns[-SESSION_TURN_WINDOW:]
+    warnings = list(state.get("warnings", []))
+    summary = session_memory.history_summary
+    if overflow:
+        try:
+            summary = _summarize_session_history(session_memory.history_summary, overflow)
+        except AskWorkflowError as exc:
+            warnings.append(f"Session history summary failed; older turns were removed: {exc}")
+        session_memory = session_memory.model_copy(
+            update={
+                "history_summary": summary,
+                "archived_turn_count": session_memory.archived_turn_count + len(overflow),
+                "turns": retained_turns,
+            }
+        )
+    if state.get("persist_session_memory", True):
+        session_memory = save_session_memory(session_memory)
+    return {
+        **state,
+        "session_memory": session_memory,
+        "warnings": _dedupe_strings(warnings),
+        "trace_events": _append_trace(
+            state,
+            "Session Summarizer",
+            "会话摘要",
+            f"Archived {len(overflow)} turns; retained {len(session_memory.turns)} recent turns.",
+        ),
+    }
+
+
+def _summarize_session_history(existing_summary: str | None, turns: list[SessionMemoryTurn]) -> str:
+    client = _configured_llm_client()
+    payload = {
+        "existing_summary": existing_summary or "",
+        "archived_turns": [turn.model_dump() for turn in turns],
+    }
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Summarize archived CodeReader Ask turns in Chinese. Preserve confirmed topics, files, APIs, flows, "
+                "and unresolved uncertainty. Do not invent code facts. Return concise plain text only."
+            ),
+        },
+        {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},
+    ]
+    summary = _extract_llm_text(_complete_or_raise(client, messages, [], "session summarization")).strip()
+    if not summary:
+        raise AskWorkflowError("LLM returned an empty session history summary.")
+    return summary[:2_000]
 
 
 def _compose_answer(intent: AskIntent, pack: ContextPack, memory: ProjectMemory) -> str:
@@ -920,12 +1122,18 @@ def _project_context(memory: ProjectMemory) -> str:
 
 def _session_context(session_memory: SessionMemory) -> str:
     parts = [
+        f"history_summary={session_memory.history_summary or ''}",
+        f"archived_turn_count={session_memory.archived_turn_count}",
         f"topic={session_memory.current_topic or ''}",
         f"module={session_memory.focused_module or ''}",
         f"files={', '.join(session_memory.focused_files[:8])}",
         f"apis={', '.join(session_memory.focused_apis[:8])}",
         f"flows={', '.join(session_memory.focused_flows[:5])}",
         f"last_question={session_memory.last_question or ''}",
+        "recent_turns=" + " | ".join(
+            f"{turn.intent}: {turn.question[:80]} => {turn.answer_summary[:120]}"
+            for turn in session_memory.turns[-SESSION_TURN_WINDOW:]
+        ),
     ]
     return "\n".join(part for part in parts if part.split("=", 1)[-1])
 

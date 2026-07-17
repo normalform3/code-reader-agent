@@ -39,14 +39,15 @@ Frontend UI
 -> 前端展示 Repo Map、报告、trace、证据和工具调用过程
 -> 用户在右侧 Ask 边栏追问
 -> Query Rewriter 结合 Session Memory 做指代消解
--> Intent Classifier 识别问题类型
+-> LLM Intent Classifier 识别问题类型
 -> SkillRouter 从 active skills 中选择本轮相关 Skill
 -> Context Retriever 检索 Project Memory / Module Summary / File Summary / API Index / Symbol Index / Flow Index / Session Memory
--> Tool Planner 判断是否需要只读工具
--> Evidence Collector 读取真实代码、配置或索引
+-> LLM Tool Planner 按意图和证据决定只读工具
+-> Evidence Collector 读取真实代码、配置或索引，并将裁剪结果回传给 LLM Planner
 -> Context Builder 构造小而准确的 Context Pack
 -> Answer Composer 生成带文件路径和依据的回答
 -> Memory Updater 更新 Session Memory
+-> Session Summarizer 将超过滑窗的早期轮次沉淀为历史摘要
 ```
 
 第一步支持 Vue 和 Java 项目。Vue 侧优先识别 Vite 应用入口、路由、状态管理、请求封装和页面目录；Java 侧优先识别 Maven/Gradle/Spring Boot 项目入口、包结构、Controller、Service、Repository、配置文件和测试目录。
@@ -143,7 +144,7 @@ Ask 模式入口：
 - `POST /api/agent/ask` 是报告生成后的右侧追问入口。
 - 输入 `project_path`、`question` 和可选 `session_memory`。
 - 返回 `resolved_query`、`intent_result`、`tool_plan`、`context_pack`、`code_evidence`、`intent`、`answer`、`related_files`、`implementation_path`、`key_code_notes`、`references`、`tool_calls`、`trace_events` 和 `session_memory`。
-- 返回还包含 `used_llm`、`fallback_used`、`fallback_reason` 和 `llm_model`，用于区分真实百炼回答和确定性降级回答，并向前端解释降级原因。
+- 返回包含 `used_llm`、`fallback_used`、`fallback_reason` 和 `llm_model`；Ask 关键 LLM 阶段失败时返回 HTTP 503，不产生规则型回答或会话写入。
 - 当前支持 8 类意图：项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈和符号定位。
 - Ask 模式只允许只读工具，不写被分析仓库，不运行项目命令，不执行 Git 操作。
 
@@ -181,9 +182,9 @@ Legacy Phase 4 单 Agent 解读：
 Ask runtime：
 
 - `code_reader_agent.runtime.ask_mode` 使用 LangGraph `StateGraph` 表达节点流程。
-- 节点顺序固定为 `QueryRewriter -> IntentClassifier -> ContextRetriever -> ToolPlanner -> EvidenceCollector -> ContextBuilder -> AnswerComposer -> MemoryUpdater`。
-- 如果本地开发环境暂时无法安装 `langgraph`，runtime 会使用同顺序的最小 fallback 以便离线测试；生产依赖仍在 `pyproject.toml` 中声明为 `langgraph`。
-- Ask 使用百炼 LLM 基于 `ContextPack` 组织最终回答；LLM 不能绕过只读工具和 evidence 边界。缺少模型配置或调用失败时，Answer Composer 会降级为确定性模板，并返回 `fallback_reason`。
+- 编译图为 `QueryRewriter -> LLMIntentClassifier -> SkillRouter -> ContextRetriever -> LLMToolPlanner <-> EvidenceCollector -> ContextBuilder -> AnswerComposer -> MemoryUpdater -> SessionSummarizer`。
+- Ask 只通过已编译的 LangGraph 图执行；缺少 `langgraph` 视为服务不可用。
+- LLM 负责意图识别、最多 3 轮/8 次的 safe-read 工具决策与最终回答；LLM 不能绕过 Tool Executor 和 evidence 边界。关键 LLM 阶段失败时返回 HTTP 503。
 
 ## Tool System 层
 
@@ -250,7 +251,7 @@ Skill = 技术栈名称 + 激活条件 + 扫描函数 + 解析规则 + 索引构
 
 首次分析时，Skill Registry 在 Repo Map 之后运行，返回 active skill 名称、置信度和激活原因；各 Skill 的扫描结果会沉淀到 File Summary、API Index、Symbol Index、Flow Index、Route Index、Frontend API Call Index、Data Model Index 和 Mapper Relation 候选。
 
-Ask 模式中，SkillRouter 只从 active skills 中选择本轮相关 Skill。路由依据包括问题意图、关键词、Code Knowledge Index 命中和 Session Memory 关注点。只有 routed skills 会参与上下文获取和工具规划：它可以建议 `search_keyword("AuthController")`、`parse_controller()` 或 `parse_api_calls()`，但最终回答仍必须来自 Project Memory、Code Knowledge Index 和只读工具 evidence。
+Ask 模式中，SkillRouter 只从 active skills 中选择本轮相关 Skill。路由依据包括 LLM 意图、关键词、Code Knowledge Index 命中和 Session Memory 关注点。Skill 提供检索 hint 与候选工具方向；LLMToolPlanner 决定是否真实调用，最终回答仍必须来自 Project Memory、Code Knowledge Index 和只读工具 evidence。
 
 ## Context Manager 层
 

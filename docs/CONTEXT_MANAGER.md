@@ -13,7 +13,7 @@ Ask 模式的上下文分三层：
 
 - `Project Memory`：项目定位、技术栈、启动方式、入口、配置、依赖、模块和目录摘要。
 - `Code Knowledge Index`：Module Summary、File Summary、API Index、Symbol Index、Flow Index、Route Index、Frontend API Call Index、Data Model Index 和 Mapper Relation 候选。
-- `Session Memory`：当前话题、关注模块、关注文件/API/流程、上一轮问题和回答摘要。
+- `Session Memory`：当前话题、关注模块、关注文件/API/流程、最近 8 轮问答、持久历史摘要和已归档轮次数。
 - `Routed Skill Hints`：问题级 SkillRouter 选择出的本轮相关 Skill 提供 query hints、tool plan hints 和 answer prompts。
 
 ## 上下文类型
@@ -84,6 +84,7 @@ Ask 模式已经保存短期会话记忆：
 - 引用过的 API。
 - 引用过的流程。
 - 回答摘要。
+- 历史摘要和已归档轮次数。
 
 这让“那这个接口在哪里调用？”这类追问可以沿用上一轮上下文。
 
@@ -125,14 +126,14 @@ Ask 模式已经保存短期会话记忆：
 Ask 模式选择策略：
 
 1. Query Rewriter 结合 Session Memory 处理“这个 / 那个 / 继续”等追问。
-2. Intent Classifier 识别项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈、符号定位和 unknown。
+2. LLM Intent Classifier 识别项目总览、模块解释、文件解释、接口定位、流程追踪、配置查找、技术栈、符号定位和 unknown。
 3. SkillRouter 从 active skills 中选择本轮 routed skills。
 4. Context Retriever 优先从 Project Memory、Module Summary、File Summary、API Index、Symbol Index、Flow Index、Route Index、Frontend API Call Index、Data Model Index、Mapper Relation 和 Session Memory 检索，并使用 routed skill query hints。
-5. Tool Planner 判断上下文是否足够，并合并 routed skill tool plan hints；凡涉及具体实现、具体文件、具体接口、具体方法或字段的问题都规划只读工具。
-6. Evidence Collector 调用 `read_file`、`search_keyword`、`search_api_path`、`parse_dependencies`、`parse_api_calls`、`parse_controller` 等只读工具，并裁剪为短证据。
+5. LLM Tool Planner 结合上下文、routed skill hints 和已裁剪工具结果，最多 3 轮、8 次地决定是否调用 safe/read 工具。
+6. Evidence Collector 调用 `read_file`、`search_keyword`、`search_api_path`、`parse_dependencies`、`parse_api_calls`、`parse_controller` 等只读工具，并裁剪为短证据后回传 LLM Tool Planner。
 7. Context Builder 构造 `ContextPack`，只放入回答所需项目上下文、会话上下文、索引命中项、routed skill answer prompts 和代码证据。
 8. Answer Composer 输出直接回答、相关文件、候选实现路径、关键说明和参考依据。
-9. Memory Updater 写回 Session Memory。
+9. Memory Updater 写回 Session Memory；超过滑窗时 Session Summarizer 使用 LLM 压缩早期轮次。
 
 ## Context Snapshot 输出
 

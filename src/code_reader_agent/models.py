@@ -814,6 +814,8 @@ class SessionMemory(BaseModel):
     last_question: str | None = None
     last_resolved_question: str | None = None
     last_answer_summary: str | None = None
+    history_summary: str | None = None
+    archived_turn_count: int = 0
     turns: list[SessionMemoryTurn] = Field(default_factory=list)
     updated_at: str = ""
 

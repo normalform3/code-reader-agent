@@ -8,24 +8,24 @@ Ask 模式主要使用四类上下文：
 
 - Project Memory：项目定位、技术栈、入口、启动方式、配置、依赖和模块摘要。
 - Code Knowledge Index：Module Summary、File Summary、API Index、Symbol Index、Flow Index、Route Index、Frontend API Call Index、Data Model Index、Mapper Relation 候选。
-- Session Memory：当前话题、关注模块、关注文件/API/流程和上一轮问答摘要。
+- Session Memory：当前话题、关注模块、关注文件/API/流程、最近 8 轮问答、持久历史摘要和已归档轮次数。
 - Routed Skill Hints：本轮相关 Skill 提供的 query hints、tool plan hints 和 answer prompts。
 
 ## 与 Skill Router 的关系
 
 项目级 Skill 路由决定哪些 Skill 能参与首次扫描和索引构建。只有 ActiveSkill 的扫描结果会写入 Code Knowledge Index。
 
-问题级 Skill 路由决定 Ask 本轮使用哪些 Skill。Context Retriever 只使用 routed skills 的 query hints，Tool Planner 只合并 routed skills 的工具建议，Context Builder 只注入 routed skills 的 answer prompts。
+问题级 Skill 路由决定 Ask 本轮使用哪些 Skill。Context Retriever 只使用 routed skills 的 query hints，LLM Tool Planner 将它们作为工具决策提示，Context Builder 只注入 routed skills 的 answer prompts。
 
 ## Ask 上下文选择流程
 
 ```text
 Query Rewriter 处理指代
--> Intent Classifier 识别问题类型
+-> LLM Intent Classifier 识别问题类型
 -> SkillRouter 选择本轮 routed skills
 -> Context Retriever 检索 Project Memory / Code Knowledge Index / Session Memory
--> Tool Planner 合并 routed skill hints
--> Tool Executor 执行注册过的只读工具
+-> LLM Tool Planner 选择注册过的 safe/read 工具
+-> Tool Executor 执行只读工具并将裁剪结果回传 Planner
 -> Tool Result Processor 生成 CodeEvidence
 -> Context Builder 构造 Context Pack
 ```

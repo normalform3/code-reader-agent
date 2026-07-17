@@ -428,9 +428,9 @@ Java 项目优先从 Controller mapping、Service 调用、Repository/Mapper 调
 - reason
 - evidence ids
 
-`reason` 用于说明为什么调用该工具，例如“用户询问指定文件，需要读取真实代码片段”或“接口问题需要提取前端调用候选”。这些记录需要展示在 Evidence Panel 或 Ask Trace 中。
+`reason` 用于说明为什么调用该工具，例如“用户询问指定文件，需要读取真实代码片段”或“接口问题需要提取前端调用候选”。Ask 中该理由由 LLMToolPlanner 以可展示的简短说明提供；缺失时由系统生成固定说明，不能暴露模型隐藏推理。这些记录需要展示在 Evidence Panel 或 Ask Trace 中。
 
-当前 MVP 中，`/api/agent/run` 会返回紧凑版 `tool_calls` 和 `trace_events`，用于前端展示 `scan_project`、`build_repo_map`、`read_file`、`search_code`、Planner 计划、Context Snapshot 和 Report Writer 输出。`/api/agent/run/stream` 会以 SSE 输出首次项目说明书生成进度，包括 `step`、`trace`、`final` 和 `error`，其中 `final.event` 是完整 `AgentRunResult`。`/api/agent/ask` 会额外返回 `tool_plan`、`code_evidence` 和 `context_pack`，用于展示为什么调用只读工具以及哪些证据进入回答上下文。`/api/agent/ask/stream` 会把同一套公开 trace 以 SSE 事件输出，包括 `trace`、`tool_plan`、`tool_result`、`answer`、`final` 和 `error`；这些事件只展示用户可见的执行摘要，不输出模型隐藏推理链。
+当前 MVP 中，`/api/agent/run` 会返回紧凑版 `tool_calls` 和 `trace_events`，用于前端展示 `scan_project`、`build_repo_map`、`read_file`、`search_code`、Planner 计划、Context Snapshot 和 Report Writer 输出。`/api/agent/run/stream` 会以 SSE 输出首次项目说明书生成进度，包括 `step`、`trace`、`final` 和 `error`，其中 `final.event` 是完整 `AgentRunResult`。`/api/agent/ask` 会额外返回 `tool_plan`、`code_evidence` 和 `context_pack`，用于展示为什么调用只读工具以及哪些证据进入回答上下文。Ask 的 LLMToolPlanner 只可选择 Registry 中 safe/read Ask 工具，最多执行 3 轮、8 次调用；每批结果经 Tool Result Processor 裁剪后才回传模型。`/api/agent/ask/stream` 会把同一套公开 trace 以 SSE 事件输出，包括 `trace`、`tool_plan`、`tool_result`、`answer`、`final` 和 `error`；这些事件只展示用户可见的执行摘要，不输出模型隐藏推理链。
 
 ## Phase 5.0：LLM 可调用工具白名单
 

@@ -7,6 +7,7 @@ from code_reader_agent.repo_map.builder import build_repo_map
 from code_reader_agent.runtime.ask_mode import run_ask_mode
 from code_reader_agent.scanner import scan_project
 from code_reader_agent.skills.registry import KNOWLEDGE_INDEX_VERSION, default_skill_registry
+from tests.test_ask_mode import configure_llm, intent_response, llm_response, tool_call
 from tests.test_scanner import write_minimal_java_project, write_minimal_vue_project
 
 
@@ -152,6 +153,15 @@ def test_project_memory_merges_skill_indexes(tmp_path: Path) -> None:
 def test_ask_mode_uses_skill_hints_and_read_only_tool_plans(tmp_path: Path, monkeypatch: object) -> None:
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
     write_spring_vue_login_project(tmp_path)
+    configure_llm(
+        monkeypatch,
+        [
+            intent_response("flow_trace", need_code_evidence=True),
+            llm_response("读取认证控制器作为公开证据。", [tool_call("search_keyword", {"keyword": "AuthController"})]),
+            llm_response("证据已足够。"),
+            llm_response("登录功能由前端请求和认证控制器候选组成。"),
+        ],
+    )
 
     result = run_ask_mode(str(tmp_path), "登录功能是怎么实现的？")
 
@@ -161,10 +171,8 @@ def test_ask_mode_uses_skill_hints_and_read_only_tool_plans(tmp_path: Path, monk
     assert all(skill.reason for skill in result.routed_skills)
     hint_keywords = {hint.keyword for hint in result.query_hints}
     assert {"Login.vue", "auth.ts", "AuthController", "SecurityConfig", "UserDetailsService"} <= hint_keywords
-    assert result.tool_plan and result.tool_plan.need_tools is True
-    assert all(call.tool_name in {"search_keyword", "parse_controller", "parse_api_calls", "parse_routes", "parse_mapper", "read_file"} for call in result.tool_plan.tool_calls)
-    assert all(call.purpose for call in result.tool_plan.tool_calls)
-    assert any(call.tool_name == "search_keyword" and call.args.get("keyword") == "AuthController" for call in result.tool_plan.tool_calls)
+    assert result.tool_plan and result.tool_plan.need_tools is False
+    assert any(call.tool_name == "search_keyword" and call.input.get("keyword") == "AuthController" for call in result.tool_calls)
     assert result.tool_calls and all(call.reason and call.timestamp and call.duration_ms is not None for call in result.tool_calls)
     assert result.code_evidence
 
@@ -172,10 +180,11 @@ def test_ask_mode_uses_skill_hints_and_read_only_tool_plans(tmp_path: Path, monk
 def test_question_skill_router_can_narrow_unrelated_skill_hints(tmp_path: Path, monkeypatch: object) -> None:
     monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
     write_minimal_vue_project(tmp_path)
+    configure_llm(monkeypatch, [intent_response("config_lookup"), llm_response("不需要工具。"), llm_response("配置说明。")])
 
     result = run_ask_mode(str(tmp_path), "数据库配置在哪里？")
 
     assert result.intent == "config_lookup"
     assert result.routed_skills == []
     assert result.query_hints == []
-    assert result.tool_plan and any(call.tool_name == "parse_dependencies" for call in result.tool_plan.tool_calls)
+    assert result.tool_plan and result.tool_plan.need_tools is False

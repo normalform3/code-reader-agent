@@ -64,7 +64,7 @@ from code_reader_agent.models import (
     RegistryTool,
     RepoMap,
 )
-from code_reader_agent.runtime.ask_mode import run_ask_mode, run_ask_mode_events
+from code_reader_agent.runtime.ask_mode import AskWorkflowError, run_ask_mode, run_ask_mode_events
 from code_reader_agent.repo_map.builder import build_repo_map
 from code_reader_agent.runtime.agent_loop import run_agent_loop
 from code_reader_agent.runtime.llm_client import DEFAULT_API_KEY_ENV, DEFAULT_BASE_URL_ENV, LLMConfigurationError, LiteLLMClient
@@ -448,6 +448,8 @@ def ask_agent_api(request: AskModeRequest) -> AskModeResult:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except LocalStateError as exc:
         raise _state_http_error(exc) from exc
+    except AskWorkflowError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/api/agent/ask/stream")
