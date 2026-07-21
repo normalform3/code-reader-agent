@@ -242,8 +242,11 @@ UI：
 
 - `LLMIntentClassifier`：把用户问题识别为项目总览、模块解释、文件解释、调用链、接口、配置或技术栈，并输出受模型约束校验的 `IntentResult`。
 - `ContextRetriever`：优先检索 Project Memory、Module Summary、File Summary、API Index、Flow Index 和 Session Memory。
+- `GoalPlanner`：仅在 `flow_trace` 问题中，把用户目标转换为有限的前端入口/请求、Controller、Service、Mapper/Repository 等可验证证据目标。
 - `LLMToolPlanner`：基于意图、检索上下文和已裁剪工具结果，最多 3 轮、8 次地决定 safe/read 工具调用。
 - `EvidenceCollector`：执行 `read_file`、`search_keyword`、`search_symbol`、`parse_dependencies`、`parse_routes`、`parse_api_calls`、`parse_controller`、`parse_mapper` 等只读工具。
+- `EvidenceReviewer`：仅根据本轮实时代码证据审查流程目标覆盖度；关键阶段缺失且预算允许时，要求同一 Tool Planner 重规划。
+- `InvestigationReporter`：为流程调查输出已确认关系、证据引用和未确认断点；没有证据的关系不能标记为已确认。
 - `AnswerComposer`：调用模型设置中的百炼模型，基于 `ContextPack` 输出直接回答、相关文件、候选实现路径、关键代码说明和参考依据。
 - `MemoryUpdater`：保存当前问题、意图、引用文件、引用 API 和回答摘要。
 - `SessionSummarizer`：超过最近 8 轮滑窗时，将早期轮次和旧摘要压缩为持久历史摘要；摘要失败时保留旧摘要或丢弃超窗轮次并发出 warning。

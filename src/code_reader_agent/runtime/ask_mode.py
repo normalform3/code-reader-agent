@@ -32,6 +32,11 @@ from code_reader_agent.models import (
     EvidenceRef,
     FileMemorySummary,
     FlowIndexEntry,
+    InvestigationFinding,
+    InvestigationFlowStep,
+    InvestigationPlanItem,
+    InvestigationResult,
+    InvestigationReview,
     IntentResult,
     ModuleMemorySummary,
     PlannedToolCall,
@@ -117,6 +122,10 @@ class AskState(TypedDict):
     pending_tool_call_ids: NotRequired[list[str]]
     tool_rounds: NotRequired[int]
     tool_planning_complete: NotRequired[bool]
+    investigation_plan: NotRequired[list[InvestigationPlanItem]]
+    investigation_review: NotRequired[InvestigationReview]
+    investigation: NotRequired[InvestigationResult]
+    investigation_replan_count: NotRequired[int]
     references: NotRequired[list[EvidenceRef]]
     tool_calls: NotRequired[list[ToolCallRecord]]
     code_evidence: NotRequired[list[CodeEvidence]]
@@ -171,12 +180,19 @@ def run_ask_mode_events(
             emitted_trace_count = len(traces)
             if node_name == "LLMToolPlanner" and node_state.get("tool_plan"):
                 yield {"type": "tool_plan", "node": node_name, "event": node_state["tool_plan"].model_dump()}
+            if node_name == "GoalPlanner":
+                yield {"type": "goal_plan", "node": node_name, "event": [item.model_dump() for item in node_state.get("investigation_plan", [])]}
             if node_name == "EvidenceCollector":
                 calls = node_state.get("tool_calls", [])
                 for call in calls[emitted_tool_count:]:
                     yield {"type": "tool_result", "node": node_name, "event": call.model_dump()}
                 emitted_tool_count = len(calls)
-            if node_name == "AnswerComposer":
+            if node_name == "EvidenceReviewer" and node_state.get("investigation_review"):
+                review = node_state["investigation_review"]
+                yield {"type": "evidence_review", "node": node_name, "event": review.model_dump()}
+                if review.needs_more_evidence:
+                    yield {"type": "replan", "node": node_name, "event": {"reason": review.stop_reason}}
+            if node_name in {"AnswerComposer", "InvestigationReporter"}:
                 yield {"type": "answer", "node": node_name, "event": {"answer": node_state.get("answer", "")}}
     yield {"type": "final", "event": _ask_result_from_state(final_state).model_dump()}
 
@@ -218,6 +234,8 @@ def _initial_ask_state(
         "warnings": [],
         "trace_events": [],
         "planner_messages": [],
+        "investigation_plan": [],
+        "investigation_replan_count": 0,
         "pending_tool_call_ids": [],
         "planned_tool_calls": [],
         "tool_rounds": 0,
@@ -236,6 +254,7 @@ def _ask_result_from_state(state: AskState) -> AskModeResult:
         answer=state.get("answer", ""),
         resolved_query=state.get("resolved_query"),
         intent_result=state.get("intent_result"),
+        investigation=state.get("investigation"),
         tool_plan=state.get("tool_plan"),
         context_pack=state.get("context_pack"),
         routed_skills=state.get("routed_skills", []),
@@ -293,25 +312,39 @@ def _build_graph() -> Any:
     graph.add_node("LLMIntentClassifier", _llm_intent_classifier)
     graph.add_node("SkillRouter", _skill_router)
     graph.add_node("ContextRetriever", _context_retriever)
+    graph.add_node("GoalPlanner", _goal_planner)
     graph.add_node("LLMToolPlanner", _llm_tool_planner)
     graph.add_node("EvidenceCollector", _evidence_collector)
+    graph.add_node("EvidenceReviewer", _evidence_reviewer)
     graph.add_node("ContextBuilder", _context_builder)
     graph.add_node("AnswerComposer", _answer_composer)
+    graph.add_node("InvestigationReporter", _investigation_reporter)
     graph.add_node("MemoryUpdater", _memory_updater)
     graph.add_node("SessionSummarizer", _session_summarizer)
     graph.set_entry_point("QueryRewriter")
     graph.add_edge("QueryRewriter", "LLMIntentClassifier")
     graph.add_edge("LLMIntentClassifier", "SkillRouter")
     graph.add_edge("SkillRouter", "ContextRetriever")
-    graph.add_edge("ContextRetriever", "LLMToolPlanner")
+    graph.add_edge("ContextRetriever", "GoalPlanner")
+    graph.add_edge("GoalPlanner", "LLMToolPlanner")
     graph.add_conditional_edges(
         "LLMToolPlanner",
         _tool_planning_route,
-        {"collect": "EvidenceCollector", "build": "ContextBuilder"},
+        {"collect": "EvidenceCollector", "review": "EvidenceReviewer", "build": "ContextBuilder"},
     )
     graph.add_edge("EvidenceCollector", "LLMToolPlanner")
-    graph.add_edge("ContextBuilder", "AnswerComposer")
+    graph.add_conditional_edges(
+        "EvidenceReviewer",
+        _evidence_review_route,
+        {"replan": "LLMToolPlanner", "build": "ContextBuilder"},
+    )
+    graph.add_conditional_edges(
+        "ContextBuilder",
+        _answer_route,
+        {"answer": "AnswerComposer", "report": "InvestigationReporter"},
+    )
     graph.add_edge("AnswerComposer", "MemoryUpdater")
+    graph.add_edge("InvestigationReporter", "MemoryUpdater")
     graph.add_edge("MemoryUpdater", "SessionSummarizer")
     graph.add_edge("SessionSummarizer", END)
     return graph.compile()
@@ -543,6 +576,77 @@ def _context_retriever(state: AskState) -> AskState:
     }
 
 
+def _goal_planner(state: AskState) -> AskState:
+    """Create a finite, public evidence plan for feature and flow questions."""
+
+    if state["intent"] != "flow_trace":
+        return state
+
+    plan = _flow_investigation_plan(state)
+    return {
+        **state,
+        "investigation_plan": plan,
+        "trace_events": _append_trace(
+            state,
+            "Goal Planner",
+            "调查目标规划",
+            f"Created {len(plan)} verifiable evidence goals for the requested implementation flow.",
+        ),
+    }
+
+
+def _flow_investigation_plan(state: AskState) -> list[InvestigationPlanItem]:
+    stack = {item.lower() for item in state["project_memory"].project_memory.tech_stack}
+    active_skills = {item.name for item in state["project_memory"].active_skills}
+    has_vue = "vue" in stack or "VueSkill" in active_skills
+    has_spring = bool({"spring boot", "spring web"} & stack) or "SpringBootSkill" in active_skills
+    plan: list[InvestigationPlanItem] = []
+    if has_vue:
+        plan.extend(
+            [
+                InvestigationPlanItem(
+                    id="frontend_origin",
+                    title="定位前端入口或页面",
+                    evidence_goal="读取 Vue 路由或页面代码，确认功能从哪个页面或路由进入。",
+                ),
+                InvestigationPlanItem(
+                    id="frontend_request",
+                    title="定位前端请求",
+                    evidence_goal="读取请求封装或页面代码，确认实际 API 路径或请求调用。",
+                ),
+            ]
+        )
+    if has_spring:
+        plan.extend(
+            [
+                InvestigationPlanItem(
+                    id="controller",
+                    title="定位后端接口入口",
+                    evidence_goal="读取 Controller 映射和处理方法，确认接口入口。",
+                ),
+                InvestigationPlanItem(
+                    id="service",
+                    title="定位业务服务",
+                    evidence_goal="读取 Service 或 Controller 调用，确认业务处理层。",
+                ),
+                InvestigationPlanItem(
+                    id="data_access",
+                    title="定位数据访问层",
+                    evidence_goal="读取 Mapper、Repository、DAO 或 SQL 映射，确认数据访问候选。",
+                ),
+            ]
+        )
+    if not plan:
+        plan.append(
+            InvestigationPlanItem(
+                id="implementation_evidence",
+                title="定位实现证据",
+                evidence_goal="读取与问题相关的真实源码，确认可追溯实现路径。",
+            )
+        )
+    return plan
+
+
 def _llm_tool_planner(state: AskState) -> AskState:
     """Ask the LLM whether another bounded batch of safe read tools is needed."""
 
@@ -567,6 +671,7 @@ def _llm_tool_planner(state: AskState) -> AskState:
                 tool_calls=state.get("planned_tool_calls", []),
             ),
             "tool_planning_complete": True,
+            "tool_rounds": rounds + 1,
             "trace_events": _append_trace(state, "LLM Tool Planner", "工具规划完成", "LLM selected no further read-only tools."),
         }
 
@@ -612,6 +717,8 @@ def _complete_tool_planning(state: AskState, warning: str) -> AskState:
 def _tool_planning_route(state: AskState) -> str:
     if state.get("tool_plan", ToolPlan(need_tools=False, reason="")).need_tools:
         return "collect"
+    if state.get("intent") == "flow_trace":
+        return "review"
     return "build"
 
 
@@ -664,6 +771,239 @@ def _evidence_collector(state: AskState) -> AskState:
         "pending_tool_call_ids": [],
         "trace_events": _append_trace(state, "Evidence Collector", "工具执行", f"Executed {len(state.get('tool_plan', ToolPlan(need_tools=False, reason='')).tool_calls)} read-only tool calls."),
     }
+
+
+def _evidence_reviewer(state: AskState) -> AskState:
+    """Judge flow-plan coverage from fresh tool evidence before a final report."""
+
+    plan = list(state.get("investigation_plan", []))
+    fresh_evidence = [item for item in state.get("code_evidence", []) if item.source == "tool"]
+    satisfied_ids = [item.id for item in plan if _goal_has_evidence(item.id, fresh_evidence)]
+    reviewed_plan = [
+        item.model_copy(update={"status": "satisfied" if item.id in satisfied_ids else "missing"})
+        for item in plan
+    ]
+    missing = [item.evidence_goal for item in reviewed_plan if item.status == "missing"]
+    used_calls = len(state.get("tool_calls", []))
+    rounds = state.get("tool_rounds", 0)
+    can_replan = bool(missing) and used_calls < MAX_TOOL_CALLS and rounds < MAX_TOOL_ROUNDS
+    if not missing:
+        stop_reason = "所有预设流程阶段均已获得实时代码证据。"
+    elif can_replan:
+        stop_reason = "关键流程阶段仍缺少证据，Agent 将继续规划只读工具调用。"
+    else:
+        stop_reason = "工具预算已用尽或没有剩余调查轮次，保留当前部分结论。"
+    review = InvestigationReview(
+        satisfied_goal_ids=satisfied_ids,
+        missing_evidence=missing,
+        needs_more_evidence=can_replan,
+        stop_reason=stop_reason,
+        next_step="围绕缺失阶段读取关联源码。" if can_replan else None,
+    )
+    warnings = list(state.get("warnings", []))
+    if missing and not can_replan:
+        warnings.append("功能/流程调查未获得全部关键代码证据，结果将标记为部分完成。")
+    return {
+        **state,
+        "investigation_plan": reviewed_plan,
+        "investigation_review": review,
+        "investigation_replan_count": state.get("investigation_replan_count", 0) + int(can_replan),
+        "planner_messages": (
+            [
+                *state.get("planner_messages", []),
+                {
+                    "role": "user",
+                    "content": json.dumps(
+                        {
+                            "investigation_review": review.model_dump(),
+                            "instruction": "Continue the investigation by collecting evidence for the listed missing goals.",
+                        },
+                        ensure_ascii=False,
+                    ),
+                },
+            ]
+            if can_replan
+            else state.get("planner_messages", [])
+        ),
+        "warnings": _dedupe_strings(warnings),
+        "trace_events": _append_trace(
+            state,
+            "Evidence Reviewer",
+            "证据覆盖审查",
+            f"Satisfied {len(satisfied_ids)}/{len(reviewed_plan)} investigation goals; {'replanning' if can_replan else 'reporting'} next.",
+        ),
+    }
+
+
+def _evidence_review_route(state: AskState) -> str:
+    review = state.get("investigation_review")
+    return "replan" if review and review.needs_more_evidence else "build"
+
+
+def _goal_has_evidence(goal_id: str, evidence: list[CodeEvidence]) -> bool:
+    for item in evidence:
+        path = (item.file_path or "").lower()
+        text = " ".join([item.content_summary, item.code_snippet or "", item.api or ""]).lower()
+        if goal_id == "frontend_origin" and (path.endswith(".vue") or "/router/" in path or "path:" in text):
+            return True
+        if goal_id == "frontend_request" and ("/api/" in text or any(token in text for token in ("fetch(", "axios", "request("))):
+            return True
+        if goal_id == "controller" and (path.endswith("controller.java") or "@getmapping" in text or "@postmapping" in text or "@requestmapping" in text):
+            return True
+        if goal_id == "service" and (path.endswith("service.java") or "@service" in text or " service" in text):
+            return True
+        if goal_id == "data_access" and (
+            path.endswith(("mapper.java", "repository.java", "dao.java", "mapper.xml"))
+            or any(token in text for token in ("@mapper", " mapper", " repository", "<select"))
+        ):
+            return True
+        if goal_id == "implementation_evidence" and item.file_path:
+            return True
+    return False
+
+
+def _answer_route(state: AskState) -> str:
+    return "report" if state.get("intent") == "flow_trace" else "answer"
+
+
+def _investigation_reporter(state: AskState) -> AskState:
+    """Create a deterministic, evidence-only report for a flow investigation."""
+
+    plan = list(state.get("investigation_plan", []))
+    review = state.get("investigation_review", InvestigationReview(stop_reason="调查未完成证据审查。"))
+    evidence = [item for item in state.get("code_evidence", []) if item.source == "tool"]
+    references = state.get("references", [])
+    findings = [_finding_for_goal(item, evidence, references) for item in plan]
+    steps = _investigation_flow_steps(plan, evidence, references)
+    confirmed_steps = [item for item in steps if item.status == "confirmed"]
+    complete = not review.missing_evidence and bool(steps) and len(confirmed_steps) == len(steps)
+    status = "complete" if complete else "partial"
+    investigation = InvestigationResult(
+        goal=state["question"],
+        status=status,
+        plan=plan,
+        flow_steps=steps,
+        findings=findings,
+        review=review,
+    )
+    answer = _investigation_answer(investigation)
+    return {
+        **state,
+        "investigation": investigation,
+        "answer": answer,
+        "used_llm": True,
+        "fallback_used": False,
+        "fallback_reason": None,
+        "trace_events": _append_trace(
+            state,
+            "Investigation Reporter",
+            "调查报告交付",
+            f"Delivered a {status} evidence-backed implementation-flow report with {len(confirmed_steps)} confirmed relationships.",
+        ),
+    }
+
+
+def _finding_for_goal(
+    goal: InvestigationPlanItem,
+    evidence: list[CodeEvidence],
+    references: list[EvidenceRef],
+) -> InvestigationFinding:
+    supporting = [item for item in evidence if _goal_has_evidence(goal.id, [item])]
+    refs = _references_for_evidence(supporting, references)
+    if supporting and refs:
+        paths = ", ".join(_dedupe_strings([item.path for item in refs])[:2])
+        return InvestigationFinding(
+            title=goal.title,
+            statement=f"已从 {paths} 读取到满足该调查目标的代码证据。",
+            status="confirmed",
+            confidence=1.0,
+            evidence=refs,
+        )
+    return InvestigationFinding(
+        title=goal.title,
+        statement="当前尚未读取到足以确认该流程阶段的代码证据。",
+        status="unconfirmed",
+        missing_evidence=[goal.evidence_goal],
+    )
+
+
+def _investigation_flow_steps(
+    plan: list[InvestigationPlanItem],
+    evidence: list[CodeEvidence],
+    references: list[EvidenceRef],
+) -> list[InvestigationFlowStep]:
+    ordered_ids = [item.id for item in plan if item.status == "satisfied"]
+    labels = {
+        "frontend_origin": "Vue 页面或路由",
+        "frontend_request": "前端 API 请求",
+        "controller": "Spring Controller",
+        "service": "Spring Service",
+        "data_access": "Mapper / Repository",
+        "implementation_evidence": "相关实现源码",
+    }
+    relations = {
+        ("frontend_origin", "frontend_request"): "页面或路由触发请求调用",
+        ("frontend_request", "controller"): "请求路径到达后端接口",
+        ("controller", "service"): "接口处理方法委托业务服务",
+        ("service", "data_access"): "业务服务调用数据访问层",
+    }
+    steps: list[InvestigationFlowStep] = []
+    for source_id, target_id in zip(ordered_ids, ordered_ids[1:]):
+        source_evidence = [item for item in evidence if _goal_has_evidence(source_id, [item])]
+        target_evidence = [item for item in evidence if _goal_has_evidence(target_id, [item])]
+        link_evidence = _link_evidence(source_id, target_id, source_evidence, target_evidence)
+        refs = _references_for_evidence(link_evidence, references)
+        steps.append(
+            InvestigationFlowStep(
+                source=labels.get(source_id, source_id),
+                target=labels.get(target_id, target_id),
+                relation=relations.get((source_id, target_id), "按已读取阶段形成的候选实现顺序"),
+                status="confirmed" if refs else "unconfirmed",
+                evidence=refs,
+            )
+        )
+    return steps
+
+
+def _link_evidence(
+    source_id: str,
+    target_id: str,
+    source_evidence: list[CodeEvidence],
+    target_evidence: list[CodeEvidence],
+) -> list[CodeEvidence]:
+    source_text = "\n".join(item.code_snippet or "" for item in source_evidence).lower()
+    target_text = "\n".join(item.code_snippet or "" for item in target_evidence).lower()
+    if (source_id, target_id) == ("frontend_origin", "frontend_request"):
+        return source_evidence if any(token in source_text for token in ("fetch(", "axios", "request(", "/api/")) else []
+    if (source_id, target_id) == ("frontend_request", "controller"):
+        shared_paths = set(_api_paths_from_text(source_text)) & set(_api_paths_from_text(target_text))
+        return [*source_evidence, *target_evidence] if shared_paths else []
+    if (source_id, target_id) == ("controller", "service"):
+        return source_evidence if "service" in source_text else []
+    if (source_id, target_id) == ("service", "data_access"):
+        return source_evidence if any(token in source_text for token in ("mapper", "repository", "dao")) else []
+    return []
+
+
+def _api_paths_from_text(text: str) -> list[str]:
+    return re.findall(r"/[a-z0-9_./{}:-]+", text)
+
+
+def _references_for_evidence(evidence: list[CodeEvidence], references: list[EvidenceRef]) -> list[EvidenceRef]:
+    paths = {item.file_path for item in evidence if item.file_path}
+    return _dedupe_evidence([item for item in references if item.path in paths])[:4]
+
+
+def _investigation_answer(investigation: InvestigationResult) -> str:
+    confirmed = [item for item in investigation.findings if item.status == "confirmed"]
+    lines = [f"调查结论：本次功能/流程调查为{('完整' if investigation.status == 'complete' else '部分')}完成。"]
+    if confirmed:
+        lines.append("已确认阶段：" + "；".join(item.title for item in confirmed) + "。")
+    if investigation.review.missing_evidence:
+        lines.append("未确认断点：" + "；".join(investigation.review.missing_evidence) + "。")
+    if investigation.flow_steps:
+        lines.append("流程关系：" + " → ".join([investigation.flow_steps[0].source, *[item.target for item in investigation.flow_steps]]) + "。")
+    return "\n".join(lines)
 
 
 def _context_builder(state: AskState) -> AskState:
@@ -819,6 +1159,8 @@ def _initial_tool_planner_messages(state: AskState) -> list[dict[str, Any]]:
         "related_files": state.get("related_files", [])[:12],
         "related_apis": state.get("related_apis", [])[:8],
         "skill_hints": [item.model_dump() for item in state.get("query_hints", [])[:12]],
+        "investigation_plan": [item.model_dump() for item in state.get("investigation_plan", [])],
+        "investigation_review": state["investigation_review"].model_dump() if state.get("investigation_review") else None,
     }
     return [
         {
@@ -827,6 +1169,8 @@ def _initial_tool_planner_messages(state: AskState) -> list[dict[str, Any]]:
                 "You are the CodeReader Ask tool planner. Decide whether safe read-only tools are needed to answer the "
                 "question with evidence. Use only supplied function tools. Before calling tools, return at most one short "
                 "public reason sentence; do not reveal hidden reasoning. When evidence is sufficient, call no tool."
+                " For flow investigations, satisfy the listed evidence goals before stopping; after a review identifies gaps, "
+                "choose tools that read the missing implementation stage."
             ),
         },
         {"role": "user", "content": json.dumps(payload, ensure_ascii=False)},

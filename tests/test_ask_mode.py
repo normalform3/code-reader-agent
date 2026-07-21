@@ -213,3 +213,100 @@ def test_ask_streams_langgraph_node_progress(tmp_path: Path, monkeypatch: pytest
     assert "SessionSummarizer" in trace_nodes
     assert any(event["type"] == "tool_result" for event in events)
     assert events[-1]["type"] == "final"
+
+
+def write_feature_flow_project(root: Path, *, include_mapper: bool = True) -> None:
+    (root / "frontend" / "src" / "views").mkdir(parents=True)
+    (root / "backend" / "src" / "main" / "java" / "com" / "example" / "demo").mkdir(parents=True)
+    (root / "frontend" / "package.json").write_text(
+        json.dumps({"name": "flow-web", "dependencies": {"vue": "^3.5.0"}}), encoding="utf-8"
+    )
+    (root / "backend" / "pom.xml").write_text(
+        "<project><artifactId>flow-api</artifactId><dependencies><dependency><artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>",
+        encoding="utf-8",
+    )
+    (root / "frontend" / "src" / "views" / "LoginView.vue").write_text(
+        "<script setup>\nconst login = () => fetch('/api/login')\n</script>\n<template><button @click=\"login\" /></template>\n",
+        encoding="utf-8",
+    )
+    package = root / "backend" / "src" / "main" / "java" / "com" / "example" / "demo"
+    (package / "AuthController.java").write_text(
+        "@RestController\npublic class AuthController { private final AuthService authService; @PostMapping(\"/api/login\") public String login() { return authService.login(); } }\n",
+        encoding="utf-8",
+    )
+    (package / "AuthService.java").write_text(
+        "@Service\npublic class AuthService { private final UserMapper userMapper; public String login() { return userMapper.findUser(); } }\n",
+        encoding="utf-8",
+    )
+    if include_mapper:
+        (package / "UserMapper.java").write_text(
+            "@Mapper\npublic interface UserMapper { String findUser(); }\n",
+            encoding="utf-8",
+        )
+
+
+def test_flow_investigation_returns_complete_evidence_chain(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    write_feature_flow_project(tmp_path)
+    frontend = "frontend/src/views/LoginView.vue"
+    controller = "backend/src/main/java/com/example/demo/AuthController.java"
+    service = "backend/src/main/java/com/example/demo/AuthService.java"
+    mapper = "backend/src/main/java/com/example/demo/UserMapper.java"
+    configure_llm(
+        monkeypatch,
+        [
+            intent_response("flow_trace", need_code_evidence=True),
+            llm_response(
+                "读取端到端链路。",
+                [
+                    tool_call("read_file", {"relative_path": frontend}, "flow-1"),
+                    tool_call("read_file", {"relative_path": controller}, "flow-2"),
+                    tool_call("read_file", {"relative_path": service}, "flow-3"),
+                    tool_call("read_file", {"relative_path": mapper}, "flow-4"),
+                ],
+            ),
+            llm_response("证据已充分。"),
+        ],
+    )
+
+    result = run_ask_mode(str(tmp_path), "登录功能的数据如何流转？")
+
+    assert result.investigation is not None
+    assert result.investigation.status == "complete"
+    assert all(item.status == "satisfied" for item in result.investigation.plan)
+    assert result.investigation.flow_steps
+    assert all(step.status == "confirmed" and step.evidence for step in result.investigation.flow_steps)
+    assert all(finding.evidence for finding in result.investigation.findings if finding.status == "confirmed")
+    assert any(event.stage == "Goal Planner" for event in result.trace_events)
+    assert any(event.stage == "Evidence Reviewer" for event in result.trace_events)
+    assert any(event.stage == "Investigation Reporter" for event in result.trace_events)
+
+
+def test_flow_investigation_marks_missing_stage_partial_after_replanning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CODEREADER_STATE_DIR", str(tmp_path / "state"))
+    write_feature_flow_project(tmp_path, include_mapper=False)
+    configure_llm(
+        monkeypatch,
+        [
+            intent_response("flow_trace", need_code_evidence=True),
+            llm_response(
+                "先读取后端实现。",
+                [
+                    tool_call("read_file", {"relative_path": "backend/src/main/java/com/example/demo/AuthController.java"}, "partial-1"),
+                    tool_call("read_file", {"relative_path": "backend/src/main/java/com/example/demo/AuthService.java"}, "partial-2"),
+                ],
+            ),
+            llm_response("当前没有更多可读证据。"),
+            llm_response("当前没有更多可读证据。"),
+        ],
+    )
+
+    events = list(run_ask_mode_events(str(tmp_path), "登录流程怎么走？"))
+    result = next(event["event"] for event in events if event["type"] == "final")
+
+    assert result["investigation"]["status"] == "partial"
+    assert any(item["status"] == "missing" for item in result["investigation"]["plan"])
+    assert any(event["type"] == "goal_plan" for event in events)
+    assert any(event["type"] == "evidence_review" for event in events)
+    assert any(event["type"] == "replan" for event in events)
+    assert any(event["type"] == "answer" and event.get("node") == "InvestigationReporter" for event in events)

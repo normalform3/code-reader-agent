@@ -363,6 +363,49 @@ type ToolPlan = {
   tool_calls: PlannedToolCall[];
 };
 
+type InvestigationPlanItem = {
+  id: string;
+  title: string;
+  evidence_goal: string;
+  status: "pending" | "satisfied" | "missing";
+};
+
+type InvestigationReview = {
+  satisfied_goal_ids: string[];
+  missing_evidence: string[];
+  needs_more_evidence: boolean;
+  stop_reason: string;
+  next_step: string | null;
+};
+
+type InvestigationEvidence = EvidenceRef;
+
+type InvestigationFlowStep = {
+  source: string;
+  target: string;
+  relation: string;
+  status: "confirmed" | "unconfirmed";
+  evidence: InvestigationEvidence[];
+};
+
+type InvestigationFinding = {
+  title: string;
+  statement: string;
+  status: "confirmed" | "unconfirmed";
+  confidence: number;
+  evidence: InvestigationEvidence[];
+  missing_evidence: string[];
+};
+
+type InvestigationResult = {
+  goal: string;
+  status: "complete" | "partial";
+  plan: InvestigationPlanItem[];
+  flow_steps: InvestigationFlowStep[];
+  findings: InvestigationFinding[];
+  review: InvestigationReview;
+};
+
 type CodeEvidence = {
   source: "memory" | "tool";
   file_path: string | null;
@@ -418,6 +461,7 @@ type AskModeResult = {
   answer: string;
   resolved_query: ResolvedQuery | null;
   intent_result: IntentResult | null;
+  investigation: InvestigationResult | null;
   tool_plan: ToolPlan | null;
   context_pack: ContextPack | null;
   routed_skills: RoutedSkillInfo[];
@@ -473,6 +517,9 @@ type AskConversation = {
 
 type AskStreamEvent =
   | { type: "trace"; node?: string; event?: TraceEvent }
+  | { type: "goal_plan"; node?: string; event?: InvestigationPlanItem[] }
+  | { type: "evidence_review"; node?: string; event?: InvestigationReview }
+  | { type: "replan"; node?: string; event?: { reason?: string } }
   | { type: "tool_plan"; node?: string; event?: ToolPlan }
   | { type: "tool_result"; node?: string; event?: AskModeResult["tool_calls"][number] }
   | { type: "answer"; node?: string; event?: { answer?: string }; answer?: string }
@@ -850,6 +897,26 @@ function App() {
                   ...message,
                   body: message.body || "Agent 正在分析问题并收集证据...",
                   traceEvents: [...(message.traceEvents ?? []), event.event],
+                };
+              }
+              if (event.type === "goal_plan" && event.event) {
+                return {
+                  ...message,
+                  body: `Agent 已制定 ${event.event.length} 项可验证调查目标，正在收集流程证据...`,
+                };
+              }
+              if (event.type === "evidence_review" && event.event) {
+                return {
+                  ...message,
+                  body: event.event.needs_more_evidence
+                    ? "Agent 发现关键证据缺口，正在重新规划调查..."
+                    : "Agent 已完成证据审查，正在生成调查报告...",
+                };
+              }
+              if (event.type === "replan") {
+                return {
+                  ...message,
+                  body: event.event?.reason ?? "Agent 正在围绕证据缺口重新规划...",
                 };
               }
               if (event.type === "tool_plan") {
@@ -1517,6 +1584,8 @@ function AgentPanel({
           ) : null}
         </div>
 
+        {askResult?.investigation ? <InvestigationCard investigation={askResult.investigation} /> : null}
+
         <div className="ask-context">
           <details>
             <summary>{askResult ? "Ask Trace" : "Planner / Context"}</summary>
@@ -1591,6 +1660,43 @@ function AgentPanel({
         </button>
       </div>
     </aside>
+  );
+}
+
+function InvestigationCard({ investigation }: { investigation: InvestigationResult }) {
+  return (
+    <section className="investigation-card" data-status={investigation.status}>
+      <header>
+        <div>
+          <p className="kicker">自主调查</p>
+          <strong>{investigation.status === "complete" ? "证据闭环完成" : "部分证据调查"}</strong>
+        </div>
+        <span>{investigation.plan.filter((item) => item.status === "satisfied").length}/{investigation.plan.length} 目标</span>
+      </header>
+      <p>{investigation.goal}</p>
+      <ol className="investigation-plan">
+        {investigation.plan.map((item) => (
+          <li data-status={item.status} key={item.id}>
+            <strong>{item.title}</strong>
+            <small>{item.status === "satisfied" ? "已验证" : "待确认"}</small>
+          </li>
+        ))}
+      </ol>
+      {investigation.flow_steps.length ? (
+        <div className="investigation-flow">
+          {investigation.flow_steps.map((step) => (
+            <div data-status={step.status} key={`${step.source}-${step.target}`}>
+              <strong>{step.source} → {step.target}</strong>
+              <small>{step.status === "confirmed" ? step.relation : `待确认：${step.relation}`}</small>
+              {step.evidence.length ? <code>{step.evidence.map((item) => item.path).join(" · ")}</code> : null}
+            </div>
+          ))}
+        </div>
+      ) : null}
+      {investigation.review.missing_evidence.length ? (
+        <p className="warning-note">未确认断点：{investigation.review.missing_evidence.join("；")}</p>
+      ) : null}
+    </section>
   );
 }
 

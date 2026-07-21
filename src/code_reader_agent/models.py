@@ -859,6 +859,57 @@ class ToolPlan(BaseModel):
     tool_calls: list[PlannedToolCall] = Field(default_factory=list)
 
 
+class InvestigationPlanItem(BaseModel):
+    """One public, verifiable objective in a flow investigation."""
+
+    id: str
+    title: str
+    evidence_goal: str
+    status: Literal["pending", "satisfied", "missing"] = "pending"
+
+
+class InvestigationFlowStep(BaseModel):
+    """One evidence-backed relationship in an investigated implementation flow."""
+
+    source: str
+    target: str
+    relation: str
+    status: Literal["confirmed", "unconfirmed"]
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+
+
+class InvestigationFinding(BaseModel):
+    """A conclusion produced by the investigation reporter."""
+
+    title: str
+    statement: str
+    status: Literal["confirmed", "unconfirmed"]
+    confidence: float = 0.0
+    evidence: list[EvidenceRef] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+
+
+class InvestigationReview(BaseModel):
+    """Public evidence-coverage decision made before reporting the investigation."""
+
+    satisfied_goal_ids: list[str] = Field(default_factory=list)
+    missing_evidence: list[str] = Field(default_factory=list)
+    needs_more_evidence: bool = False
+    stop_reason: str = ""
+    next_step: str | None = None
+
+
+class InvestigationResult(BaseModel):
+    """Structured result for an autonomous feature or flow investigation."""
+
+    goal: str
+    status: Literal["complete", "partial"]
+    plan: list[InvestigationPlanItem] = Field(default_factory=list)
+    flow_steps: list[InvestigationFlowStep] = Field(default_factory=list)
+    findings: list[InvestigationFinding] = Field(default_factory=list)
+    review: InvestigationReview = Field(default_factory=InvestigationReview)
+
+
 class CodeEvidence(BaseModel):
     """Short evidence item selected for a Context Pack."""
 
@@ -907,6 +958,7 @@ class AskModeResult(BaseModel):
     answer: str
     resolved_query: ResolvedQuery | None = None
     intent_result: IntentResult | None = None
+    investigation: InvestigationResult | None = None
     tool_plan: ToolPlan | None = None
     context_pack: ContextPack | None = None
     routed_skills: list[RoutedSkillInfo] = Field(default_factory=list)

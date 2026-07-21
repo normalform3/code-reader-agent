@@ -25,9 +25,11 @@ QueryRewriter
 -> LLMIntentClassifier
 -> SkillRouter
 -> ContextRetriever
+-> GoalPlanner (仅 flow_trace)
 -> LLMToolPlanner <-> EvidenceCollector
+-> EvidenceReviewer (仅 flow_trace，可回到 Tool Planner 重规划)
 -> ContextBuilder
--> AnswerComposer (Bailian LLM)
+-> AnswerComposer (普通 Ask) / InvestigationReporter (flow_trace)
 -> MemoryUpdater
 -> SessionSummarizer
 ```
@@ -83,6 +85,7 @@ Skill 只做三件事：
 - `resolved_query`
 - `intent_result`
 - `tool_plan`
+- `investigation`：仅 `flow_trace` 返回，包含目标计划、已确认/未确认流程步骤、结论、证据覆盖审查和停止原因。
 - `context_pack`
 - `routed_skills`
 - `query_hints`
@@ -107,10 +110,13 @@ Skill 只做三件事：
 
 事件类型：
 
-- `trace`：一个公开 `TraceEvent`，表示 Query Rewriter、LLM Intent Classifier、Skill Router、Context Retriever、LLM Tool Planner、Evidence Collector、Context Builder、Answer Composer、Memory Updater 或 Session Summarizer 节点完成。
+- `trace`：一个公开 `TraceEvent`，表示 Query Rewriter、LLM Intent Classifier、Skill Router、Context Retriever、Goal Planner、LLM Tool Planner、Evidence Collector、Evidence Reviewer、Context Builder、Answer Composer、Investigation Reporter、Memory Updater 或 Session Summarizer 节点完成。
+- `goal_plan`：流程调查的可验证证据目标。
+- `evidence_review`：流程调查的已满足目标、缺口和停止决定。
+- `replan`：Evidence Reviewer 要求 Tool Planner 围绕证据缺口继续调查。
 - `tool_plan`：本轮只读工具计划，包括是否需要工具、计划原因和候选工具调用。
 - `tool_result`：一个只读工具执行摘要，包括工具名、输入摘要、输出摘要、状态和 reason。
-- `answer`：Answer Composer 完成后的回答文本；第一版是节点级流式，不承诺 token 级增量。
+- `answer`：Answer Composer 或 Investigation Reporter 完成后的回答文本；第一版是节点级流式，不承诺 token 级增量。
 - `final`：完整 `AskModeResult`，前端应以该 payload 更新 session memory、trace、warnings 和最终回答；如果请求携带 `conversation_id`，事件还会带回更新后的 Ask conversation 摘要。
 - `error`：流式执行失败时的错误摘要。
 
